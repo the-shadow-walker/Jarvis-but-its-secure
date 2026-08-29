@@ -23,6 +23,18 @@ class VMError(Exception):
     pass
 
 
+class VMBusy(VMError):
+    """A destructive lifecycle op was asked for while turns hold the guest.
+
+    REFUSE rather than wait, deliberately. These are operator actions from the VM
+    widget, and a turn can hold the guest for many minutes (a research job, a
+    long agent run) — waiting would hang the HTTP request with no bound and no
+    feedback, and the operator would not know why. Refusing names what is running
+    and hands the decision back, the same shape as the deploy guard's in-flight
+    check. `force` is the escape hatch: a leaked refcount (a turn whose release
+    never ran) must not make the guest permanently un-nukeable."""
+
+
 _VERSION_RE = re.compile(r"base-v(\d+)\.qcow2$")
 
 
@@ -201,8 +213,35 @@ class GuestVM:
         for name in ("overlay.qcow2", "efi_vars_run.fd", "console.log"):
             (settings.vm_dir / name).unlink(missing_ok=True)
 
-    async def nuke(self) -> None:
+    def _refuse_if_busy(self, what: str, force: bool = False) -> None:
+        """Guard for the destructive operator ops. Call under `_lock` so a turn
+        cannot slip past between the check and the teardown — `acquire` takes the
+        same lock to bump `_inflight`."""
+        if self._inflight > 0 and not force:
+            raise VMBusy(
+                f"{self._inflight} turn(s) are running in the guest — {what} "
+                "would kill them mid-flight. Wait for them to finish, or repeat "
+                "with force=true to take the guest down anyway.")
+
+    async def ensure_booted(self) -> None:
+        """The operator's boot button. `boot()` itself takes no lock, and two
+        concurrent boots are not idempotent — the second would _kill_orphans the
+        first's qemu and rebuild the overlay under it — so the operator path goes
+        through the same lock `acquire` and the reaper use."""
         async with self._lock:
+            await self.boot()
+
+    async def shutdown(self, force: bool = False) -> None:
+        """The operator's teardown button: refuses while turns hold the guest.
+        `teardown()` stays unguarded because the reaper, selftest and app
+        shutdown call it having already established the guest is free."""
+        async with self._lock:
+            self._refuse_if_busy("teardown", force)
+            await self.teardown()
+
+    async def nuke(self, force: bool = False) -> None:
+        async with self._lock:
+            self._refuse_if_busy("nuke", force)
             await self.teardown()
             await self.boot()
 
@@ -305,7 +344,11 @@ class GuestVM:
         """Boot the guest and run ONE real no-tools reasoning turn INSIDE it via
         guest_turn (the loop runs in the guest, its model calls dialing back to
         the host gateway). Returns the guest's answer + the isolation report.
-        Tears the guest down after."""
+
+        Refuses while turns hold the guest, and tears the guest down after ONLY
+        if it is still free — the teardown in the finally used to fire
+        unconditionally, so hitting /api/vm/selftest killed every live turn. The
+        boot is under `_lock` for the same reason `ensure_booted` is."""
         if not base_built():
             raise VMError("no golden image — run vm/build_base.sh on the Pi first")
         if not gateway.enabled:
@@ -315,7 +358,9 @@ class GuestVM:
         confirm_peak(0)                        # the turn-level peak decision is the
         # caller's (here, the operator running the selftest); the guest's per-call
         # model_calls then pass the gateway's peak gate, as a host chat turn does.
-        await self.boot()
+        async with self._lock:
+            self._refuse_if_busy("selftest")
+            await self.boot()
         deadline = asyncio.get_event_loop().time() + settings.vm_boot_timeout_seconds
         final = None
         try:
@@ -334,7 +379,12 @@ class GuestVM:
                     await asyncio.sleep(2)      # guest run-turn server not up yet
             isolation = self._isolation()
         finally:
-            await self.teardown()
+            # the selftest's own turn has released by now (its generator ran to
+            # exhaustion); anything still holding the guest is a REAL turn that
+            # started while we were testing, and it keeps the guest.
+            async with self._lock:
+                if self._inflight == 0:
+                    await self.teardown()
         if final is None:
             raise VMError("guest run-turn server did not become reachable in time")
         return {"reply": final, "isolation": isolation}
