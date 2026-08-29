@@ -52,18 +52,51 @@ Roughly 21k lines of Python and 8k of JS across ~80 test modules and 43 tools.
 - `docs/SELF.md` — the agent's own technical manual, served by the `self_docs` tool
 - `scripts/` — Pi setup, systemd units, backup + image-rebuild timers, E2E smoke
 
-## Deploy (test Pi)
+## Install
 
 ```
 git clone https://github.com/Grindlewalt/Jav3.git ~/jarvis
-cd ~/jarvis && bash scripts/setup_pi.sh
+cd ~/jarvis && bash scripts/install.sh
 echo 'JARVIS_DEEPSEEK_API_KEY=sk-...' >> ~/.config/jarvis/env
 .venv/bin/python -m backend.cli create-user <name>
-systemctl --user restart jarvis     # GUI at http://<pi>:8000
+systemctl --user restart jarvis     # GUI at http://<host>:8000
 ```
 
+`scripts/install.sh` is re-runnable, so it is the upgrade path too. It works on
+Debian/Ubuntu, Arch and Fedora, on arm64 and x86_64.
+
+The handful of steps that genuinely need root are collected into one phase, so
+they are one paste rather than a conversation:
+
+```
+bash scripts/install.sh --check                 # what is missing? changes nothing
+bash scripts/install.sh --target user@host      # ...on a remote host, over ssh
+sudo bash scripts/install.sh --root-phase       # packages, kvm, vsock, linger
+bash scripts/install.sh                         # everything else, unprivileged
+```
+
+Every failed check prints its own fix command. One failure no script can clear:
+if the CPU's virtualization extension is off in firmware, `--check` says so and
+stops — the agent loop runs inside a KVM guest and there is no host-side
+fallback, so that is a reboot into BIOS by a human.
+
+**Moving hosts.** `--from` migrates the durable state that is *not* in git —
+`memory/`, `projects/`, `skills/`, `agents/`, `tools/` and the SQLite DB:
+
+```
+bash scripts/install.sh --from grindlewalt@oldhost:jarvis
+```
+
+It snapshots the source DB through SQLite's backup API (a live WAL database
+cannot be safely copied as a file), verifies `integrity_check` on arrival, and
+refuses to overwrite non-empty local state without `--force`. If the source is
+unreachable it fails hard rather than quietly starting a fresh install over the
+top of a migration. `data/vm/` is deliberately not copied: the golden image is
+built for the source host's architecture and is rebuilt natively instead.
+
 Update loop: `git pull -q && (cd frontend && npm run build) && systemctl --user
-restart jarvis` — check for in-flight agent work first.
+restart jarvis` — check for in-flight agent work first, or use
+`scripts/deploy_pi.sh`, which does that guarding for you.
 
 ## Dev
 

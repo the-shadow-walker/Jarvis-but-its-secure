@@ -15,22 +15,31 @@ set -euo pipefail
 VERSION="${JARVIS_VM_IMAGE_VERSION:-v1}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VM_DIR="${VM_DIR:-$HOME/jarvis/data/vm}"
-IMAGE_URL="https://cloud.debian.org/images/cloud/trixie/latest/debian-13-genericcloud-arm64.qcow2"
+
+# Arch, firmware paths and the qemu binary are resolved per host — this used to
+# be hardcoded aarch64/AAVMF, which is why the image could only ever be built on
+# the Pi. See vm/platform.sh.
+# shellcheck source=vm/platform.sh
+. "$SCRIPT_DIR/platform.sh"
+jarvis_platform_detect || exit 1
+
 CHECKSUMS_URL="https://cloud.debian.org/images/cloud/trixie/latest/SHA512SUMS"
-AAVMF_CODE="/usr/share/AAVMF/AAVMF_CODE.fd"
-AAVMF_VARS="/usr/share/AAVMF/AAVMF_VARS.fd"
+IMAGE_NAME="debian-13-genericcloud-${DEB_ARCH}.qcow2"
+IMAGE_URL="https://cloud.debian.org/images/cloud/trixie/latest/${IMAGE_NAME}"
 DISK_SIZE="8G"
 BASE="base-${VERSION}.qcow2"
+
+echo "== host: $VM_ARCH ($DEB_ARCH guest), $QEMU_BIN, firmware $FW_CODE =="
 
 mkdir -p "$VM_DIR"
 cd "$VM_DIR"
 [[ -f "$BASE" ]] && { echo "$BASE already exists — delete it first to rebuild" >&2; exit 1; }
 
-echo "== [1/5] fetch + verify Debian genericcloud arm64 =="
+echo "== [1/5] fetch + verify Debian genericcloud $DEB_ARCH =="
 if [[ ! -f pristine.qcow2 ]]; then
   curl -fL --retry 3 -o pristine.qcow2.part "$IMAGE_URL"
   curl -fL --retry 3 -o SHA512SUMS "$CHECKSUMS_URL"
-  want=$(grep 'genericcloud-arm64.qcow2$' SHA512SUMS | awk '{print $1}' | head -1)
+  want=$(grep "${IMAGE_NAME}\$" SHA512SUMS | awk '{print $1}' | head -1)
   got=$(sha512sum pristine.qcow2.part | awk '{print $1}')
   [[ -n "$want" && "$want" == "$got" ]] || { echo "checksum mismatch (want=$want got=$got)" >&2; exit 1; }
   mv pristine.qcow2.part pristine.qcow2
@@ -114,16 +123,16 @@ power_state:
   mode: poweroff
   message: provisioning complete
 EOF
-cloud-localds seed.iso user-data meta-data
+jarvis_make_seed seed.iso
 
 echo "== [3/5] provision boot (KVM, SLIRP net for cloud-init only) =="
 cp pristine.qcow2 base-work.qcow2
 qemu-img resize base-work.qcow2 "$DISK_SIZE"
-cp "$AAVMF_VARS" efi_vars_build.fd
-timeout 1800 qemu-system-aarch64 \
-  -machine virt,gic-version=host -accel kvm -cpu host \
+cp "$FW_VARS" efi_vars_build.fd
+timeout 1800 "$QEMU_BIN" \
+  "${QEMU_MACHINE[@]}" \
   -smp 2 -m 1024 \
-  -drive if=pflash,format=raw,readonly=on,file="$AAVMF_CODE" \
+  -drive if=pflash,format=raw,readonly=on,file="$FW_CODE" \
   -drive if=pflash,format=raw,file=efi_vars_build.fd \
   -drive file=base-work.qcow2,if=virtio,format=qcow2 \
   -drive file=seed.iso,if=virtio,format=raw,readonly=on \
@@ -137,6 +146,10 @@ grep -q 'provisioning complete\|jarvis-provisioned\|reached target.*Power-Off\|P
 echo "== [5/5] freeze read-only golden image =="
 mv base-work.qcow2 "$BASE"
 chmod 444 "$BASE"
-cp "$AAVMF_VARS" efi_vars.fd
+cp "$FW_VARS" efi_vars.fd
+# Record the arch this image was built for. data/ gets rsynced between hosts
+# during a migration, and an arm64 image on an x86 host boots to nothing at all
+# with the guest's console going to a log nobody reads. run_vm.sh checks this.
+echo "$VM_ARCH" > "base-${VERSION}.arch"
 rm -f seed.iso user-data meta-data efi_vars_build.fd
-echo "built $VM_DIR/$BASE (version $VERSION)"
+echo "built $VM_DIR/$BASE (version $VERSION, $VM_ARCH)"
