@@ -183,7 +183,14 @@ async def _open_run(db, agent: dict, task: str,
     # a scheduled run really has no parent conversation.
     conversation_id = await open_conversation(
         db, project=active, title=title, kind="agent", commit=False,
-        parent=runtime.conversation_id.get())
+        parent=runtime.conversation_id.get(),
+        # WHO this run is, not just what it did. Only the chat path set this,
+        # so every spawned and scheduled run had agent_slug NULL — and slug
+        # addressing matches on that column, so `send_message('builder')`
+        # answered "nothing is running under that address" while a builder run
+        # was live, and the queued row was never claimed. A temp agent has no
+        # roster entry and correctly gets None.
+        agent=agent.get("slug"))
     await db.execute(
         "INSERT INTO messages (conversation_id, role, content) VALUES (?, 'user', ?)",
         (conversation_id, task))
@@ -335,7 +342,9 @@ async def run_agent(slug: str, body: RunAgent):
             active = await get_active_project(db)
         title = f"[{agent['name']}] " + " ".join(body.task.split())[:40]
         conversation_id = await open_conversation(
-            db, project=active, title=title, kind="agent")
+            db, project=active, title=title, kind="agent",
+            # addressable by name while it runs, like every other agent run
+            agent=slug)
 
         if body.confirm_peak:
             confirm_peak(conversation_id)

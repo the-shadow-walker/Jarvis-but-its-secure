@@ -34,6 +34,22 @@ from backend.vm.gateway_server import handle_conn
 MAXD = autonomy.MAX_SPAWN_DEPTH
 
 
+_TOKENS: dict[str, str] = {}
+
+
+def _register(env) -> None:
+    """Register a turn the way `guest_turn` does: envelope AND token."""
+    broker.register_turn(env)
+    _TOKENS[env.op_id] = f"tok-{env.op_id}"
+    broker.register_token(env.op_id, _TOKENS[env.op_id])
+
+
+def _unregister(op_id: str) -> None:
+    broker.release_turn(op_id)
+    broker.release_token(op_id)
+    _TOKENS.pop(op_id, None)
+
+
 def _names(specs):
     return {s["function"]["name"] for s in specs}
 
@@ -49,8 +65,12 @@ async def _gateway_call(op_id: str, name: str, args: dict) -> str:
                                  context=contextvars.Context())
     try:
         await loop.sock_sendall(a, (json.dumps(
-            {"op": "tool_broker_call", "op_id": op_id, "name": name,
-             "args": args}) + "\n").encode())
+            {"op": "tool_broker_call", "op_id": op_id,
+             # the turn's capability token, minted by `guest_turn` in
+             # production and by `_register` below here. Without it the gateway
+             # refuses: an op_id names a turn, it does not prove one.
+             "op_token": _TOKENS.get(op_id, ""),
+             "name": name, "args": args}) + "\n").encode())
         data = b""
         while b"\n" not in data:
             chunk = await asyncio.wait_for(loop.sock_recv(a, 65536), timeout=10)
@@ -76,11 +96,11 @@ async def test_broker_restores_spawn_depth(monkeypatch):
         return "ok"
     monkeypatch.setattr(registry, "dispatch", fake_dispatch)
 
-    broker.register_turn(broker.TurnEnvelope(op_id="op-deep", spawn_depth=1))
+    _register(broker.TurnEnvelope(op_id="op-deep", spawn_depth=1))
     try:
         out = await _gateway_call("op-deep", "anything", {})
     finally:
-        broker.release_turn("op-deep")
+        _unregister("op-deep")
     assert out["type"] == "broker_result" and out["result"] == "ok"
     assert seen["depth"] == 1, (
         "the guest's tool call landed on the gateway task with spawn_depth "
@@ -142,7 +162,7 @@ async def _run_spawn_chain(monkeypatch, tmp_env, limit=12):
         real guest_turn does), then, if the turn was handed spawn tools, makes
         one brokered spawn_agent call the way the guest would."""
         env, op_id = kw.get("envelope"), kw.get("op_id")
-        broker.register_turn(env)
+        _register(env)
         try:
             if "spawn_agent" in _names(kw.get("tool_specs") or []):
                 if len(depths) < limit:
@@ -150,7 +170,7 @@ async def _run_spawn_chain(monkeypatch, tmp_env, limit=12):
                                         {"agent": "worker", "task": "go"})
             yield {"type": "final", "content": "done"}
         finally:
-            broker.release_turn(op_id)
+            _unregister(op_id)
     monkeypatch.setattr(gt_mod, "guest_turn", fake_guest_turn)
 
     async def fake_headless(slug, task, active=agents_run._USE_DB):
@@ -199,13 +219,13 @@ async def test_spawn_tools_are_dropped_at_the_cap_over_the_broker(monkeypatch,
         return {"conversation_id": 1, "agent": slug, "final": "done"}
     monkeypatch.setattr(agents_run, "run_agent_headless", fake_headless)
 
-    broker.register_turn(broker.TurnEnvelope(op_id="op-cap",
+    _register(broker.TurnEnvelope(op_id="op-cap",
                                              spawn_depth=MAXD - 1))
     try:
         await _gateway_call("op-cap", "spawn_agent",
                             {"agent": "worker", "task": "go"})
     finally:
-        broker.release_turn("op-cap")
+        _unregister("op-cap")
     assert "spawn_agent" not in seen["names"]
     assert "spawn_temp_agent" not in seen["names"]
 
