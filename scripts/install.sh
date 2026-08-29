@@ -140,17 +140,40 @@ have() { command -v "$1" >/dev/null 2>&1; }
 MISSING_ROOT=() MISSING_USER=() BLOCKED=()
 
 check_cpu_virt() {
-  if grep -qwE 'vmx|svm' /proc/cpuinfo; then
-    ok "CPU virtualization extension present"
+  # A working /dev/kvm settles the question on every architecture — if the
+  # kernel published the device, virtualization is on. Check that FIRST, before
+  # any flag guessing.
+  if [ -e /dev/kvm ]; then
+    ok "virtualization enabled (/dev/kvm exists)"
+    return 0
+  fi
+
+  # No /dev/kvm. Why depends entirely on the architecture, and getting this
+  # wrong is worse than not checking: `vmx`/`svm` are x86-only CPUID flags and
+  # aarch64 does not advertise virtualization in /proc/cpuinfo at all, so the
+  # naive grep reported "DISABLED IN FIRMWARE" on a working Raspberry Pi and
+  # told the operator to go find a BIOS that does not exist.
+  if [ "$ARCH" = x86_64 ]; then
+    if grep -qwE 'vmx|svm' /proc/cpuinfo; then
+      # Flag present but no device: the module simply is not loaded.
+      warn "virtualization supported but /dev/kvm absent — the kvm module is not loaded"
+    else
+      # On AMD the sub-feature bits (svm_lock, npt, nrip_save…) still enumerate
+      # when the base SVM bit is masked, which is exactly what a BIOS-disabled
+      # machine looks like. This is the one failure no amount of sudo fixes.
+      bad "CPU virtualization is DISABLED IN FIRMWARE (no vmx/svm in /proc/cpuinfo)"
+      BLOCKED+=("Reboot into BIOS/UEFI and enable virtualization.")
+      BLOCKED+=("  Intel: VT-x.  AMD: 'SVM Mode', usually under Advanced > CPU Configuration.")
+      BLOCKED+=("  Without it the kvm module cannot load and the agent loop has nowhere")
+      BLOCKED+=("  to run — the host-side fallback loop was removed in M4e (2026-08-02).")
+    fi
   else
-    # The AMD sub-feature bits still enumerate when the base SVM bit is masked,
-    # which is exactly what a BIOS-disabled machine looks like. Say so plainly:
-    # this is the one failure no amount of sudo fixes.
-    bad "CPU virtualization is DISABLED IN FIRMWARE (no vmx/svm in /proc/cpuinfo)"
-    BLOCKED+=("Reboot into BIOS/UEFI and enable virtualization.")
-    BLOCKED+=("  Intel: VT-x.  AMD: 'SVM Mode', usually under Advanced > CPU Configuration.")
-    BLOCKED+=("  Without it the kvm module cannot load and the agent loop has nowhere")
-    BLOCKED+=("  to run — the host-side fallback loop was removed in M4e (2026-08-02).")
+    # aarch64: no cpuinfo flag exists to test. KVM needs the CPU to have booted
+    # at EL2 and the kernel to have KVM support; both show up as the device
+    # appearing, so there is nothing else to probe. Say what is true and do NOT
+    # send anyone to a BIOS — a Pi has no such screen.
+    bad "no /dev/kvm on $ARCH"
+    fix "check the kernel has KVM support and the CPU booted at EL2: dmesg | grep -i kvm"
   fi
 }
 
