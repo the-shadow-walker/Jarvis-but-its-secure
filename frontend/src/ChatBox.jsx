@@ -1,7 +1,9 @@
 import { useEffect, useRef, useState } from 'react'
-import { api, chatStream, tailStream } from './api.js'
-import { applyTurnEvent, finishTurn, MessageBody } from './ToolActivity.jsx'
+import { api } from './api.js'
+import { MessageBody } from './ToolActivity.jsx'
+import { useChatTurn } from './useChatTurn.js'
 import { useAsk } from './ask.jsx'
+import EmptyState from './components/EmptyState.jsx'
 
 // Compact chat, embeddable anywhere (board panel). When projectSlug is set,
 // conversations are filtered to that project and new ones are linked to it.
@@ -12,6 +14,10 @@ import { useAsk } from './ask.jsx'
 // it keeps multi-turn history, compaction, detach/re-attach and stop for free.
 // Several panels on one board, each on a different agent, work the same project
 // at the same time — the picker is what makes that expressible.
+//
+// The streaming machinery — event folding, open-and-resume, stop, the peak-
+// pricing gate — is useChatTurn, shared with the Chat page. It used to be a
+// near-verbatim copy of it.
 export default function ChatBox({ projectSlug, agent = '', onAgentChange }) {
   // the picker is owned by the panel (so it survives a remount and a reload);
   // fall back to local state for any caller that doesn't hold it
@@ -21,40 +27,12 @@ export default function ChatBox({ projectSlug, agent = '', onAgentChange }) {
   const [agents, setAgents] = useState([])
   const [convos, setConvos] = useState([])
   const [cid, setCid] = useState(null)
-  const [messages, setMessages] = useState([])
   const [input, setInput] = useState('')
-  const [busy, setBusy] = useState(false)
   const [showHistory, setShowHistory] = useState(false)
-  // draft parked on a peak-pricing 409 — in-page, never window.confirm (the
-  // iOS home-screen app suppresses blocking dialogs; see Chat.jsx)
-  const [peakAsk, setPeakAsk] = useState(null)
   const bottomRef = useRef(null)
-  const tailAbort = useRef(null)   // cancels a resume-tail on switch/unmount
+  const turn = useChatTurn()
+  const { messages, busy, peakAsk, setPeakAsk } = turn
   const ask = useAsk()
-
-  useEffect(() => () => tailAbort.current?.abort(), [])
-
-  // shared by the live POST stream and a resumed background-turn tail
-  function handleTurnEvent(ev) {
-    if (['token', 'tool', 'tool_result', 'job'].includes(ev.type))
-      setMessages((m) => {
-        const copy = [...m]
-        copy[copy.length - 1] = applyTurnEvent(copy[copy.length - 1], ev)
-        return copy
-      })
-    if (ev.type === 'final')
-      setMessages((m) => {
-        const copy = [...m]
-        copy[copy.length - 1] = finishTurn(copy[copy.length - 1], ev.content)
-        return copy
-      })
-    if (ev.type === 'error')
-      setMessages((m) => {
-        const copy = [...m]
-        copy[copy.length - 1] = { role: 'error', content: ev.message }
-        return copy
-      })
-  }
 
   const refresh = () =>
     api(`/api/conversations${projectSlug ? `?project=${encodeURIComponent(projectSlug)}` : ''}`)
@@ -89,7 +67,7 @@ export default function ChatBox({ projectSlug, agent = '', onAgentChange }) {
   function newChat() {
     setShowHistory(false)
     setCid(null)
-    setMessages([])
+    turn.setMessages([])
     setPeakAsk(null)
   }
 
@@ -110,84 +88,36 @@ export default function ChatBox({ projectSlug, agent = '', onAgentChange }) {
   }, [messages])
 
   async function open(id) {
-    tailAbort.current?.abort()
-    setPeakAsk(null)
     setCid(id)
-    if (!id) { setMessages([]); return }
-    const r = await api(`/api/conversations/${id}/messages`)
-    setMessages(r.messages)
-    if (!r.running) return
-    // a turn is still executing server-side — re-attach and watch it finish,
-    // seeding the placeholder with the tool calls it already made
-    setBusy(true)
-    const seed = (r.pending_activity || []).map((a) => ({ kind: 'tool', ...a }))
-    setMessages((m) => [...m, { role: 'assistant', content: '', streaming: true, parts: seed }])
-    const ctl = new AbortController()
-    tailAbort.current = ctl
-    try {
-      await tailStream(`/api/chat/${id}/stream`, (ev) => {
-        if (ev.type === 'idle') {
-          api(`/api/conversations/${id}/messages`).then((r2) => setMessages(r2.messages))
-          return
-        }
-        handleTurnEvent(ev)
-      }, ctl.signal)
-    } catch { /* tail aborted; messages reload on next open */ }
-    setBusy(false)
-  }
-
-  async function stop() {
-    // ends the turn server-side; the tail's final "[Request interrupted]"
-    // event settles the UI through the normal finish path
-    if (!cid) return
-    try { await api(`/api/chat/${cid}/stop`, { method: 'POST' }) } catch { /* already done */ }
+    await turn.openThread(id)
   }
 
   async function send(confirmPeak = false, resend = null) {
     const text = (resend ?? input).trim()
     if (!text || busy) return
-    setBusy(true)
     // clear the bar NOW — the message visibly left; it comes back on failure
     if (!resend) setInput('')
     const wasNew = cid === null
-    setMessages((m) => [...m, { role: 'user', content: text },
-                        { role: 'assistant', content: '', streaming: true, parts: [] }])
-    try {
-      await chatStream(
-        // a NEW conversation is created pre-pinned to this board's project, so
-        // even its first turn runs in the right context (the old post-hoc PATCH
-        // raced the turn's project resolution)
-        // identity, like the project pin, binds at creation only — the backend
-        // ignores it on an existing conversation
-        { message: text, conversation_id: cid, confirm_peak: confirmPeak,
-          project: wasNew && projectSlug ? projectSlug : undefined,
-          agent: wasNew && who ? who : undefined },
-        (ev) => {
-          if (ev.type === 'start') {
-            setCid(ev.conversation_id)
-            if (wasNew) refresh()   // the new thread joins its picker's list
-          }
-          handleTurnEvent(ev)
-        },
-      )
-      if (!projectSlug) refresh()
-    } catch (err) {
-      setMessages((m) => m.slice(0, -2))
-      if (err.status === 409 && err.detail === 'peak_confirmation_required') {
-        // a new conversation doesn't exist yet on this 409 (the backend
-        // gates before creating it), so the confirmed retry re-sends the
-        // parked draft from scratch
-        setPeakAsk(text)
-      } else if (err.status === 409 && err.detail === 'turn_in_progress') {
-        setInput(text)
-        setMessages((m) => [...m, { role: 'error',
-          content: 'a turn is still running in this chat — wait for it to finish' }])
-      } else {
-        setInput(text)
-        setMessages((m) => [...m, { role: 'error', content: err.detail || String(err) }])
-      }
-    }
-    setBusy(false)
+    await turn.runTurn({
+      text,
+      // a NEW conversation is created pre-pinned to this board's project, so
+      // even its first turn runs in the right context (the old post-hoc PATCH
+      // raced the turn's project resolution)
+      // identity, like the project pin, binds at creation only — the backend
+      // ignores it on an existing conversation
+      body: { message: text, conversation_id: cid, confirm_peak: confirmPeak,
+              project: wasNew && projectSlug ? projectSlug : undefined,
+              agent: wasNew && who ? who : undefined },
+      onEvent: (ev) => {
+        if (ev.type === 'start') {
+          setCid(ev.conversation_id)
+          if (wasNew) refresh()   // the new thread joins its picker's list
+        }
+        turn.handleTurnEvent(ev)
+      },
+      onDone: () => { if (!projectSlug) refresh() },
+      onRestoreDraft: setInput,
+    })
   }
 
   const current = convos.find((c) => c.id === cid)
@@ -214,7 +144,7 @@ export default function ChatBox({ projectSlug, agent = '', onAgentChange }) {
       </div>
       {showHistory && (
         <ul className="cb-history">
-          {threads.length === 0 && <li className="dim">no past threads yet</li>}
+          {threads.length === 0 && <EmptyState as="li">no past threads yet</EmptyState>}
           {threads.map((c) => (
             <li key={c.id} className={c.id === cid ? 'active' : ''}
                 onClick={() => pick(c.id)}>
@@ -227,9 +157,9 @@ export default function ChatBox({ projectSlug, agent = '', onAgentChange }) {
       )}
       <div className="messages compact">
         {messages.length === 0 && (
-          <div className="dim center-pad">
+          <EmptyState pad>
             {projectSlug ? `chat with ${whoName} about this project` : 'say hi'}
-          </div>
+          </EmptyState>
         )}
         {messages.map((m, i) => (
           <div key={i} className={`msg ${m.role}`}>
@@ -261,7 +191,7 @@ export default function ChatBox({ projectSlug, agent = '', onAgentChange }) {
                   }} />
         {busy
           ? <button type="button" className="ghost danger" title="stop this turn"
-                    onClick={stop}>⏹</button>
+                    onClick={() => turn.stopTurn(cid)}>⏹</button>
           : <button type="submit">↑</button>}
       </form>
     </div>

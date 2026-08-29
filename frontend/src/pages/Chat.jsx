@@ -1,104 +1,15 @@
 import {
   useCallback, useContext, useEffect, useLayoutEffect, useRef, useState,
 } from 'react'
-import { api, chatStream, tailStream } from '../api.js'
+import { api } from '../api.js'
 import { NavSlotContext } from '../App.jsx'
 import { useDismiss } from '../useDismiss.js'
 import { isPhone, useIsPhone } from '../breakpoints.js'
-import { applyTurnEvent, finishTurn, MessageBody } from '../ToolActivity.jsx'
+import { MessageBody } from '../ToolActivity.jsx'
 import { notifyError } from '../notify.js'
 import { useAsk } from '../ask.jsx'
-
-// Empty-state greeting, swapped in per new chat. Mostly not about the time of
-// day — a handful per period nod to it (capped at 5) so it doesn't read as a
-// gimmick that's always talking about the clock.
-const GREETINGS = {
-  morning: [
-    'Morning, sir.',
-    'Good morning — try not to open forty tabs before breakfast.',
-    'Early start, sir?',
-    "The coffee's fresh; so is the morning queue.",
-    'Up with the sun, or fighting it?',
-    "Right then — where do we begin?",
-    'Standing by, as ever.',
-    'Systems nominal. You, less certain — go on then.',
-    "Another queue, another day. Let's clear it.",
-    "I've been awake the whole time. You get the excuse.",
-    'At your service, sir.',
-    "Whenever you're ready.",
-    "Let's make today's list somebody else's problem.",
-    "You bring the questions, I'll bring the follow-through.",
-    'First request — no pressure.',
-    'Onwards.',
-    "I've kept the seat warm.",
-    "Let's not overthink the first ten minutes.",
-    'Say the word.',
-    "No fires so far. Let's keep it that way.",
-    'Fresh terminal, clean slate.',
-    'Shall we?',
-    "I've been idling productively.",
-    'Consider me caffeinated in spirit, if nothing else.',
-  ],
-  midday: [
-    'Halfway through the day and still unbothered.',
-    'Afternoon lull? Not on my watch.',
-    "Midday check-in — what's on the docket?",
-    "The day's second half starts now.",
-    'Post-lunch fog is a you problem, not a me problem.',
-    'Say the word.',
-    'Standing by.',
-    "What's next on the list?",
-    "I've been idling productively.",
-    'Right, what\'s the crisis today?',
-    "You've survived the hard part. Onwards.",
-    "Let's turn 'later' into 'done'.",
-    'Go on, then.',
-    "I'm listening.",
-    "Whatever's next, I'm across it.",
-    'Ready and, dare I say, a little bored.',
-    'Consider me at your disposal.',
-    'One task or twelve — makes no difference to me.',
-    "Shall we get on with it?",
-    'Feed me a problem.',
-    'Still here. Still capable.',
-    "Momentum's a fragile thing. Let's not lose it.",
-    "Whatever you're stuck on, I probably have opinions.",
-    'Your move, sir.',
-  ],
-  night: [
-    'Burning those midnight tokens?',
-    'Still up, I see.',
-    'Night owl mode: engaged.',
-    "The world's asleep. We're not.",
-    'Late one, sir?',
-    'No judgment. Just data.',
-    "Let's make this quick and painless.",
-    "I don't sleep, so I don't mind.",
-    "Let's get this sorted so you can actually rest.",
-    'At your service, whatever the hour.',
-    'Quiet hours, focused work.',
-    "You're here. I'm here. Let's not waste it.",
-    'Say the word.',
-    'Fewer distractions right now, at least.',
-    'Onwards, into the quiet.',
-    "I'll keep the lights on, figuratively.",
-    'Whenever inspiration strikes, apparently.',
-    'No rush. Also, definitely some rush.',
-    "Let's be efficient about this.",
-    'The house is quiet. Good time to think.',
-    "I've got nowhere else to be.",
-    'Consider me undistracted.',
-    "Let's wrap this up before it wraps around you.",
-    "Whatever's keeping you up, let's make it worth it.",
-  ],
-}
-
-function pickGreeting() {
-  const h = new Date().getHours()
-  const period = h < 5 ? 'night' : h < 12 ? 'morning' : h < 18 ? 'midday' : 'night'
-  const list = GREETINGS[period]
-  return list[Math.floor(Math.random() * list.length)]
-}
+import { pickGreeting } from '../greetings.js'
+import { useChatTurn } from '../useChatTurn.js'
 
 // The glassy flash/pro picker at the send end of the composer. It changes the
 // same server-side setting as the nav switch (they sync over the
@@ -224,9 +135,7 @@ function ProjectPicker({ projects, mode, value, global: loaded, onPick }) {
 export default function Chat() {
   const [conversations, setConversations] = useState([])
   const [conversationId, setConversationId] = useState(null)
-  const [messages, setMessages] = useState([])
   const [input, setInput] = useState('')
-  const [busy, setBusy] = useState(false)
   const [active, setActive] = useState(null)
   const [projects, setProjects] = useState([])
   const [greeting, setGreeting] = useState(pickGreeting)
@@ -239,11 +148,11 @@ export default function Chat() {
   // Doesn't repaint the GUI — the toolbar switch and the composer placeholder
   // carry it.
   const [temporary, setTemporary] = useState(false)
-  // draft parked on a peak-pricing 409 until the operator answers in-page.
-  // This must NOT be window.confirm: the iOS home-screen app suppresses
-  // blocking dialogs, so confirm() returns false without ever showing and
-  // every send silently bounced back into the bar.
-  const [peakAsk, setPeakAsk] = useState(null)
+  // The turn itself — the transcript, whether one is in flight, the parked
+  // peak-pricing draft, and the streaming/resume/stop machinery. Shared with
+  // ChatBox, which is the same conversation API in a board panel.
+  const turn = useChatTurn()
+  const { messages, busy, peakAsk, setPeakAsk } = turn
   // on a phone the list is an overlay, so it starts closed unless the operator
   // has explicitly opened it before; on desktop it stays open by default
   const [sideOpen, setSideOpen] = useState(() => {
@@ -269,7 +178,6 @@ export default function Chat() {
   const glowRef = useRef(null)     // composer underglow — direct style writes, not state
   const orbRef = useRef(null)      // empty-state orb, measured when a chat starts
   const orbFrom = useRef(null)     // its rect at that moment; consumed by the fly-in
-  const tailAbort = useRef(null)   // cancels a resume-tail when switching chats
   const liveId = useRef(null)      // id of the turn in flight
   // Read during render, before any effect: the persistence effect below fires
   // on mount with a null id and would clear the key before a restore effect
@@ -291,7 +199,6 @@ export default function Chat() {
       else localStorage.removeItem('jarvis.chat.last')
     }).catch(() => {})
     api('/api/projects').then((r) => { setActive(r.active); setProjects(r.projects) })
-    return () => tailAbort.current?.abort()
   }, [])
 
   // "Chat" in the nav is a destination, not a reset. It used to mount a blank
@@ -367,33 +274,16 @@ export default function Chat() {
     glowRef.current?.style.setProperty('--gi', '0')
   }
 
-  // one handler for both paths: the live POST stream and a resumed tail.
-  // token/tool/tool_result fold into the streaming message's parts; final
-  // swaps in the reply with the activity collapsed above it.
+  // The page's own reading of `start`, on top of the shared folding: remember
+  // which turn is live (stop() needs it before the id exists), and adopt the
+  // conversation unless this chat is temporary — adopting it there is what
+  // would turn a temporary chat into a saved one.
   function handleTurnEvent(ev) {
     if (ev.type === 'start') {
       liveId.current = ev.conversation_id
-      // temporary: never adopt the id, or the chat becomes a saved one
       if (!temporary) setConversationId(ev.conversation_id)
     }
-    if (['token', 'tool', 'tool_result', 'job'].includes(ev.type))
-      setMessages((m) => {
-        const copy = [...m]
-        copy[copy.length - 1] = applyTurnEvent(copy[copy.length - 1], ev)
-        return copy
-      })
-    if (ev.type === 'final')
-      setMessages((m) => {
-        const copy = [...m]
-        copy[copy.length - 1] = finishTurn(copy[copy.length - 1], ev.content)
-        return copy
-      })
-    if (ev.type === 'error')
-      setMessages((m) => {
-        const copy = [...m]
-        copy[copy.length - 1] = { role: 'error', content: ev.message }
-        return copy
-      })
+    turn.handleTurnEvent(ev)
   }
 
   // the phone list overlays the thread, so picking a chat should reveal it
@@ -402,42 +292,20 @@ export default function Chat() {
   }
 
   async function openConversation(id) {
-    tailAbort.current?.abort()
     setTemporary(false)   // saved chats always persist
-    setPeakAsk(null)
     closeSideOnPhone()
     setConversationId(id)
-    const r = await api(`/api/conversations/${id}/messages`)
-    setMessages(r.messages)
-    if (!r.running) return
-    // a turn is still executing server-side — re-attach and watch it finish,
-    // seeding the placeholder with the tool calls it already made
-    setBusy(true)
-    const seed = (r.pending_activity || []).map((a) => ({ kind: 'tool', ...a }))
-    setMessages((m) => [...m, { role: 'assistant', content: '', streaming: true, parts: seed }])
-    const ctl = new AbortController()
-    tailAbort.current = ctl
-    try {
-      await tailStream(`/api/chat/${id}/stream`, (ev) => {
-        if (ev.type === 'idle') {
-          // turn ended between the messages fetch and the tail — reload
-          api(`/api/conversations/${id}/messages`).then((r2) => setMessages(r2.messages))
-          return
-        }
-        handleTurnEvent(ev)
-      }, ctl.signal)
-      refreshConvos()
-    } catch { /* tail aborted or dropped; messages reload on next open */ }
-    setBusy(false)
+    await turn.openThread(id, {
+      onEvent: handleTurnEvent, onTailDone: refreshConvos })
   }
 
   function newConversation() {
-    tailAbort.current?.abort()
-    setBusy(false)
+    turn.abortTail()
+    turn.setBusy(false)
     setPeakAsk(null)
     closeSideOnPhone()
     setConversationId(null)
-    setMessages([])
+    turn.setMessages([])
     setPendingProject('')
     setPendingMode('follow')
     setTemporary(false)
@@ -476,13 +344,9 @@ export default function Chat() {
     refreshConvos()
   }
 
-  async function stop() {
-    // the turn ends server-side and every tail gets a final "[Request
-    // interrupted]" event — the normal finish path settles the UI
-    const id = conversationId ?? liveId.current
-    if (!id) return
-    try { await api(`/api/chat/${id}/stop`, { method: 'POST' }) } catch { /* already done */ }
-  }
+  // the id may not be in state yet on the first turn of a new chat, which is
+  // exactly when stop is most likely to be wanted
+  const stop = () => turn.stopTurn(conversationId ?? liveId.current)
 
   async function send(confirmPeak = false, resend = null) {
     const text = (resend ?? input).trim()
@@ -491,39 +355,19 @@ export default function Chat() {
     // before this turn unmounts it, so the avatar can fly in from there
     if (messages.length === 0 && orbRef.current)
       orbFrom.current = orbRef.current.getBoundingClientRect()
-    setBusy(true)
     // clear the bar NOW — the message visibly left; it comes back on failure
     if (!resend) setInput('')
-    setMessages((m) => [...m, { role: 'user', content: text },
-                        { role: 'assistant', content: '', streaming: true, parts: [] }])
-    try {
-      await chatStream(
-        { message: text, conversation_id: conversationId, confirm_peak: confirmPeak,
-          ephemeral: temporary,
-          // only meaningful when the conversation is being created by this turn
-          ...(conversationId ? {} : { project: pendingProject || null,
-                                      project_mode: pendingMode }) },
-        handleTurnEvent,
-      )
-      api('/api/conversations').then((r) => setConversations(r.conversations))
-    } catch (err) {
-      // drop the two optimistic messages; a peak-retry re-adds them
-      setMessages((m) => m.slice(0, -2))
-      if (err.status === 409 && err.detail === 'peak_confirmation_required') {
-        // a new conversation doesn't exist yet on this 409 (the backend
-        // gates before creating it), so the confirmed retry re-sends the
-        // parked draft from scratch
-        setPeakAsk(text)
-      } else if (err.status === 409 && err.detail === 'turn_in_progress') {
-        setInput(text)
-        setMessages((m) => [...m, { role: 'error',
-          content: 'a turn is still running in this chat — wait for it to finish' }])
-      } else {
-        setInput(text)
-        setMessages((m) => [...m, { role: 'error', content: err.detail || String(err) }])
-      }
-    }
-    setBusy(false)
+    await turn.runTurn({
+      text,
+      body: { message: text, conversation_id: conversationId, confirm_peak: confirmPeak,
+              ephemeral: temporary,
+              // only meaningful when the conversation is being created by this turn
+              ...(conversationId ? {} : { project: pendingProject || null,
+                                          project_mode: pendingMode }) },
+      onEvent: handleTurnEvent,
+      onDone: () => api('/api/conversations').then((r) => setConversations(r.conversations)),
+      onRestoreDraft: setInput,
+    })
   }
 
   // Swipe in from the left edge to open the chat list on a phone — the old
