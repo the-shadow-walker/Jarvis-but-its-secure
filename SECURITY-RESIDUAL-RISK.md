@@ -186,7 +186,7 @@ a watched, policy-gated, cuttable pipe to the internet.
 | LAN pivot | High | Very Low | nftables drops all RFC1918 + operator servers; guest reaches only host proxy/DNS. |
 | Hypervisor / kernel escape | Critical | Low | No passthrough, minimal devices, monthly patched image; unpatched-CVE window only. |
 | Persistence | High | Very Low | Ephemeral guest + idle scrub + versioned rebuild; nukeable at any time. |
-| Egress mis-attribution | Low | **Medium** | Concurrent per-project operations are now normal; policy may consult the wrong project's allowlist in a race. Core cut/secret controls unaffected. |
+| Egress mis-attribution | Low | **Medium** | Concurrent per-project operations are now normal; policy may consult the wrong project's allowlist in a race. Core cut/secret controls unaffected. A **second guest would make this certain rather than racy** — one tap, one dnsmasq lease, one nft ruleset, and the proxy attributes by live turn rather than source address — so booting one under `vm_egress` is refused outright (`GuestVM._check_egress_ceiling`). |
 | Triage reviewer mis-allow | High | Medium | Isolated no-tools/no-fetch judge; guardrails outrank it; fail-closed parse; audited + undoable. Residual = risk #1 without the human click. |
 | Desktop reach via computer-use grants | Medium | **Medium** | Ceiling removed 2026-07-30 (operator decision): the GUI grant list is authoritative. Grants still need a logged-in operator — no tool can make one — and the client still refuses paths outside them, non-media files, and no-shell stays absolute. Residual = a host-level attacker with a session can name any folder on a paired desktop. |
 

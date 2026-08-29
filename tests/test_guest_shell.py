@@ -65,10 +65,12 @@ def wired(monkeypatch):
     monkeypatch.setattr(lifecycle, "vm", fake_vm)
     monkeypatch.setattr(lifecycle, "VMError", RuntimeError, raising=False)
 
-    async def fake_connect(port):
+    async def fake_connect(port, guest):
+        fake_connect.guests.append(guest)
         return conn
+    fake_connect.guests = []
 
-    async def fake_prime(slug):
+    async def fake_prime(slug, guest):
         fake_prime.calls.append(slug)
     fake_prime.calls = []
 

@@ -29,6 +29,14 @@ class TurnEnvelope:
     web_session: str | None = None
     ephemeral: bool = False
     event_chan: str | None = None
+    # How many spawn_agent hops deep the operation already is. This one is not
+    # cosmetic: `autonomy.MAX_SPAWN_DEPTH` is enforced ONLY by _agent_tools
+    # reading runtime.spawn_depth, and a guest tool call lands on the gateway
+    # server's task, not the turn's — so without carrying it here every brokered
+    # spawn_agent hop re-read the depth as 0, handed the child spawn tools again,
+    # and the fork-bomb fence never tripped (verified 2026-08-29,
+    # tests/test_spawn_fence.py). Cost stayed fenced by the shared Budget.
+    spawn_depth: int = 0
 
 
 _envelopes: dict[str, TurnEnvelope] = {}
@@ -100,9 +108,10 @@ async def broker_dispatch(op_id: str, name: str, args: dict) -> dict:
         return {"result": f"error: broker has no turn context for op_id {op_id!r}",
                 "taint": "trusted"}
     vars_ = (runtime.web_session, runtime.ephemeral, runtime.artifact_slug,
-             runtime.event_chan, runtime.active_project, runtime.conversation_id)
+             runtime.event_chan, runtime.active_project, runtime.conversation_id,
+             runtime.spawn_depth)
     vals = (env.web_session, env.ephemeral, env.artifact_slug, env.event_chan,
-            env.active_project, env.conversation_id)
+            env.active_project, env.conversation_id, env.spawn_depth)
     tokens = [v.set(val) for v, val in zip(vars_, vals)]
     # also restore the operation's budget id: a tool that itself runs a turn
     # (spawn_agent, deploy_agents) must resolve THIS operation's Budget so the

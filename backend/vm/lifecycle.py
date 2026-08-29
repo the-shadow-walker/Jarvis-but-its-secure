@@ -23,6 +23,18 @@ class VMError(Exception):
     pass
 
 
+class VMBusy(VMError):
+    """A destructive lifecycle op was asked for while turns hold the guest.
+
+    REFUSE rather than wait, deliberately. These are operator actions from the VM
+    widget, and a turn can hold the guest for many minutes (a research job, a
+    long agent run) — waiting would hang the HTTP request with no bound and no
+    feedback, and the operator would not know why. Refusing names what is running
+    and hands the decision back, the same shape as the deploy guard's in-flight
+    check. `force` is the escape hatch: a leaked refcount (a turn whose release
+    never ran) must not make the guest permanently un-nukeable."""
+
+
 _VERSION_RE = re.compile(r"base-v(\d+)\.qcow2$")
 
 
@@ -66,8 +78,22 @@ def base_built() -> bool:
     return _base_image().exists()
 
 
-def _console_log() -> Path:
-    return settings.vm_dir / "console.log"
+def _console_log(index: int = 0) -> Path:
+    return settings.vm_dir / _suffixed("console.log", index)
+
+
+def _suffixed(name: str, index: int) -> str:
+    """Per-guest runtime file name. Guest 0 keeps the bare name, so an existing
+    install's overlay.qcow2 / efi_vars_run.fd / console.log — and every script,
+    log-tail habit and orphan-kill pattern built around them — are unchanged.
+    Guest N gets `overlay-g1.qcow2` and friends. The golden base images stay
+    shared and read-only, which is why this suffixes files rather than giving
+    each guest its own VM_DIR: a per-guest dir would mean copying a multi-GB
+    image per sandbox."""
+    if not index:
+        return name
+    stem, dot, ext = name.partition(".")
+    return f"{stem}-g{index}{dot}{ext}"
 
 
 _REPLY_RE = re.compile(r"GUEST-SELFTEST-REPLY: '(.*?)'")
@@ -77,7 +103,14 @@ _EXTERNAL_RE = re.compile(r"GUEST-NET-EXTERNAL-REACHABLE: (True|False)")
 
 
 class GuestVM:
-    def __init__(self):
+    """One sandbox guest. `index` is its slot: 0 is THE guest — the one every
+    existing caller means, with today's CID, file names and behaviour unchanged.
+    A host configured for more gets 1, 2, ... each with its own CID and its own
+    overlay/console/EFI files, so nothing about a second instance is implicit."""
+
+    def __init__(self, index: int = 0):
+        self.index = index
+        self.name = f"guest{index}"
         self._proc: asyncio.subprocess.Process | None = None
         # lifecycle transitions (boot/teardown/reap) are serialized so the idle
         # reaper can never nuke a guest a turn is starting on, and two turns never
@@ -89,12 +122,64 @@ class GuestVM:
         self._booted_at: float | None = None
         self._rebuilding = False
 
+    @property
+    def cid(self) -> int:
+        """This guest's vsock CID. A property, not a snapshot, so tests and the
+        env-file config keep working by moving settings.vm_guest_cid."""
+        return settings.vm_guest_cid + self.index
+
+    @property
+    def overlay(self) -> Path:
+        return settings.vm_dir / _suffixed("overlay.qcow2", self.index)
+
+    @property
+    def efi_vars(self) -> Path:
+        return settings.vm_dir / _suffixed("efi_vars_run.fd", self.index)
+
+    @property
+    def console_log(self) -> Path:
+        return _console_log(self.index)
+
+    @property
+    def tap(self) -> str:
+        """The tap NIC this guest attaches to under monitored egress. Only guest
+        0 has one — see `_check_egress_ceiling`."""
+        return settings.vm_egress_tap if not self.index else \
+            f"{settings.vm_egress_tap.rstrip('0123456789')}{self.index}"
+
+    @property
+    def mac(self) -> str:
+        """Guest 0 keeps the exact MAC vm/net/dnsmasq-egress.conf pins its lease
+        to; guest N adds N to the last octet. Deterministic, so a lease could be
+        written for it — see `_check_egress_ceiling` for why none is yet."""
+        head, _, last = settings.vm_guest_mac.rpartition(":")
+        return f"{head}:{(int(last, 16) + self.index) & 0xFF:02x}"
+
+    def _check_egress_ceiling(self) -> None:
+        """Monitored egress is single-tap by construction: vm/net/jarvis-egress.nft
+        names jvtap0 in three chains and dnsmasq-egress.conf pins one interface,
+        one MAC and one lease. A second guest would therefore share guest 0's tap,
+        and the egress proxy attributes traffic to a project by which turn is
+        live, not by source address — so the second guest's requests would be
+        policed and logged as the first's. Refuse instead of quietly getting the
+        attribution wrong; making egress multi-tap is a design job, not a knob."""
+        if self.index and settings.vm_egress:
+            raise VMError(
+                f"{self.name} cannot boot while monitored egress is on: the "
+                "nftables ruleset and dnsmasq lease are written for the single "
+                "tap "
+                f"{settings.vm_egress_tap}. Run one guest, or turn off "
+                "JARVIS_VM_EGRESS.")
+
     def running(self) -> bool:
         return self._proc is not None and self._proc.returncode is None
 
     def status(self) -> dict:
         age = int(time.monotonic() - self._booted_at) if self._booted_at else None
-        return {"image_version": _active_version(),
+        return {"guest": self.index,
+                "name": self.name,
+                "cid": self.cid,
+                "image_version": _active_version(),
                 "base_built": base_built(),
                 "running": self.running(),
                 "gateway": gateway.enabled,
@@ -109,7 +194,7 @@ class GuestVM:
         base = _base_image()
         if not base.exists():
             raise VMError(f"no golden image {base.name} — run vm/build_base.sh on the Pi")
-        overlay = settings.vm_dir / "overlay.qcow2"
+        overlay = self.overlay
         overlay.unlink(missing_ok=True)
         proc = await asyncio.create_subprocess_exec(
             "qemu-img", "create", "-f", "qcow2", "-b", str(base), "-F", "qcow2",
@@ -119,19 +204,44 @@ class GuestVM:
         if proc.returncode != 0:
             raise VMError(f"overlay create failed: {err.decode(errors='replace')}")
 
+    def _orphan_pids(self) -> list[int]:
+        """PIDs of qemu processes still holding THIS guest's overlay.
+
+        Was `pkill -9 -f <overlay path>`, which matches the pattern anywhere in
+        any process's full command line — a shell that mentions the path, an
+        editor, a qemu-img, an operator's `ls -l .../overlay.qcow2` all matched,
+        and with several guests the blast radius only grows. This asks two
+        questions instead: is it a qemu, and does it have our overlay as an
+        argument. Reading /proc directly also means no dependency on procps."""
+        overlay = str(self.overlay)
+        found = []
+        proc_dir = Path("/proc")
+        if not proc_dir.is_dir():                    # not Linux — nothing to reap
+            return found
+        for entry in proc_dir.iterdir():
+            if not entry.name.isdigit():
+                continue
+            try:
+                if not entry.joinpath("comm").read_text().startswith("qemu-system"):
+                    continue
+                args = entry.joinpath("cmdline").read_bytes().decode(
+                    errors="replace").split("\0")
+            except OSError:                          # the process went away
+                continue
+            if any(overlay in a for a in args):
+                found.append(int(entry.name))
+        return found
+
     async def _kill_orphans(self) -> None:
         """Kill any qemu still holding OUR overlay (hence the guest CID) that we no
         longer track — a guest orphaned across an app restart (setsid detaches it
         from the process group teardown kills). Without this, a reboot's fresh guest
         can't bind the CID and the host would keep talking to the stale one."""
-        overlay = str(settings.vm_dir / "overlay.qcow2")
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                "pkill", "-9", "-f", overlay,
-                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
-            await proc.wait()
-        except (FileNotFoundError, OSError):
-            pass
+        for pid in self._orphan_pids():
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError, OSError):
+                pass
 
     async def _net(self, action: str) -> None:
         """Run net_up.sh up|down via passwordless sudo (Pi). Best-effort: a
@@ -139,7 +249,7 @@ class GuestVM:
         the guest then simply has no working egress (fails closed)."""
         script = settings.base_dir / "vm" / "net" / "net_up.sh"
         env = {**os.environ,
-               "JARVIS_VM_TAP": settings.vm_egress_tap,
+               "JARVIS_VM_TAP": self.tap,
                "JARVIS_VM_HOST_IP": settings.vm_egress_host_ip,
                "JARVIS_VM_PCAP": "1" if settings.vm_egress_pcap else "0"}
         try:
@@ -164,9 +274,10 @@ class GuestVM:
     async def boot(self) -> None:
         if self.running():
             return
+        self._check_egress_ceiling()
         await self._kill_orphans()
         await self._build_overlay()
-        _console_log().unlink(missing_ok=True)
+        self.console_log.unlink(missing_ok=True)
         # the monitored-egress network (tap/nft/dnsmasq/proxy) is APP-lifecycle,
         # not per-boot — it's up before any guest and survives idle-scrub reboots,
         # so the proxy's host-IP binding never flaps mid-operation. run_vm.sh
@@ -177,7 +288,15 @@ class GuestVM:
                "JARVIS_VM_BASE": _base_image().name,
                "JARVIS_VM_MEM_MB": str(settings.vm_memory_mb),
                "JARVIS_VM_CPUS": str(settings.vm_cpus),
-               "JARVIS_VM_CID": str(settings.vm_guest_cid),
+               "JARVIS_VM_CID": str(self.cid),
+               # per-guest runtime files + NIC identity. run_vm.sh defaults each
+               # of these to guest 0's old literal, so an out-of-band `bash
+               # vm/run_vm.sh` still boots the guest it always did.
+               "JARVIS_VM_OVERLAY": self.overlay.name,
+               "JARVIS_VM_EFI_VARS": self.efi_vars.name,
+               "JARVIS_VM_CONSOLE": self.console_log.name,
+               "JARVIS_VM_TAP": self.tap,
+               "JARVIS_VM_MAC": self.mac,
                "JARVIS_VM_EGRESS": "1" if settings.vm_egress else "0"}
         self._proc = await asyncio.create_subprocess_exec(
             "bash", str(run_vm), env=env, preexec_fn=os.setsid,
@@ -198,11 +317,38 @@ class GuestVM:
         self._proc = None
         self._booted_at = None
         await self._kill_orphans()
-        for name in ("overlay.qcow2", "efi_vars_run.fd", "console.log"):
-            (settings.vm_dir / name).unlink(missing_ok=True)
+        for path in (self.overlay, self.efi_vars, self.console_log):
+            path.unlink(missing_ok=True)
 
-    async def nuke(self) -> None:
+    def _refuse_if_busy(self, what: str, force: bool = False) -> None:
+        """Guard for the destructive operator ops. Call under `_lock` so a turn
+        cannot slip past between the check and the teardown — `acquire` takes the
+        same lock to bump `_inflight`."""
+        if self._inflight > 0 and not force:
+            raise VMBusy(
+                f"{self._inflight} turn(s) are running in the guest — {what} "
+                "would kill them mid-flight. Wait for them to finish, or repeat "
+                "with force=true to take the guest down anyway.")
+
+    async def ensure_booted(self) -> None:
+        """The operator's boot button. `boot()` itself takes no lock, and two
+        concurrent boots are not idempotent — the second would _kill_orphans the
+        first's qemu and rebuild the overlay under it — so the operator path goes
+        through the same lock `acquire` and the reaper use."""
         async with self._lock:
+            await self.boot()
+
+    async def shutdown(self, force: bool = False) -> None:
+        """The operator's teardown button: refuses while turns hold the guest.
+        `teardown()` stays unguarded because the reaper, selftest and app
+        shutdown call it having already established the guest is free."""
+        async with self._lock:
+            self._refuse_if_busy("teardown", force)
+            await self.teardown()
+
+    async def nuke(self, force: bool = False) -> None:
+        async with self._lock:
+            self._refuse_if_busy("nuke", force)
             await self.teardown()
             await self.boot()
 
@@ -286,7 +432,7 @@ class GuestVM:
             s = socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM)
             try:
                 await asyncio.get_running_loop().run_in_executor(
-                    None, s.connect, (settings.vm_guest_cid, GUEST_RUNTURN_PORT))
+                    None, s.connect, (self.cid, GUEST_RUNTURN_PORT))
                 return
             except OSError:
                 await asyncio.sleep(1)
@@ -295,7 +441,8 @@ class GuestVM:
         raise VMError("guest run-turn server did not become ready in time")
 
     def _isolation(self) -> dict:
-        text = _console_log().read_text(errors="replace") if _console_log().exists() else ""
+        log = self.console_log
+        text = log.read_text(errors="replace") if log.exists() else ""
         ifaces = _IFACES_RE.search(text)
         external = _EXTERNAL_RE.search(text)
         return {"interfaces": ifaces.group(1) if ifaces else None,
@@ -305,7 +452,11 @@ class GuestVM:
         """Boot the guest and run ONE real no-tools reasoning turn INSIDE it via
         guest_turn (the loop runs in the guest, its model calls dialing back to
         the host gateway). Returns the guest's answer + the isolation report.
-        Tears the guest down after."""
+
+        Refuses while turns hold the guest, and tears the guest down after ONLY
+        if it is still free — the teardown in the finally used to fire
+        unconditionally, so hitting /api/vm/selftest killed every live turn. The
+        boot is under `_lock` for the same reason `ensure_booted` is."""
         if not base_built():
             raise VMError("no golden image — run vm/build_base.sh on the Pi first")
         if not gateway.enabled:
@@ -315,7 +466,9 @@ class GuestVM:
         confirm_peak(0)                        # the turn-level peak decision is the
         # caller's (here, the operator running the selftest); the guest's per-call
         # model_calls then pass the gateway's peak gate, as a host chat turn does.
-        await self.boot()
+        async with self._lock:
+            self._refuse_if_busy("selftest")
+            await self.boot()
         deadline = asyncio.get_event_loop().time() + settings.vm_boot_timeout_seconds
         final = None
         try:
@@ -326,7 +479,8 @@ class GuestVM:
                             system_prompt="You are terse.",
                             history=[{"role": "user",
                                       "content": "Reply with exactly the word PONG and nothing else."}],
-                            op_id="vm-selftest-loop", self_check=False):
+                            op_id=f"vm-selftest-{self.name}", self_check=False,
+                            guest=self):
                         if ev.get("type") == "final":
                             final = ev.get("content")
                     break
@@ -334,23 +488,86 @@ class GuestVM:
                     await asyncio.sleep(2)      # guest run-turn server not up yet
             isolation = self._isolation()
         finally:
-            await self.teardown()
+            # the selftest's own turn has released by now (its generator ran to
+            # exhaustion); anything still holding the guest is a REAL turn that
+            # started while we were testing, and it keeps the guest.
+            async with self._lock:
+                if self._inflight == 0:
+                    await self.teardown()
         if final is None:
             raise VMError("guest run-turn server did not become reachable in time")
         return {"reply": final, "isolation": isolation}
 
 
-# module-level singleton, driven by the vm_api router
+# --- the guest registry ------------------------------------------------------
+# Slot 0 is the module-level `vm` below, unchanged, because six modules and
+# several tests import it by that name and mean exactly that object. Higher slots
+# live here and are created lazily on first use, so a host configured for one
+# guest never constructs a second — raising settings.vm_guests is the whole
+# opt-in. Instances are cached: a GuestVM owns a subprocess handle and a
+# refcount, so handing out a fresh one per call would lose track of a live guest.
+_guests: dict[int, GuestVM] = {}
+
+
+def guest_vm(index: int = 0) -> GuestVM:
+    """The guest in slot `index`, created on first use. Raises rather than
+    silently falling back to guest 0 — a caller asking for a sandbox this host
+    is not configured to run wants to hear about it."""
+    if index < 0 or index >= max(1, settings.vm_guests):
+        raise VMError(
+            f"no guest {index}: this host is configured for "
+            f"{max(1, settings.vm_guests)} (settings.vm_guests). Each guest "
+            f"costs {settings.vm_memory_mb} MB of RAM, so raise it only on a "
+            "host with the memory to spare.")
+    if not index:
+        # slot 0 resolves to the module-level `vm` every time, not to a cached
+        # copy — six modules import that name and tests monkeypatch it, and both
+        # must keep meaning the same object as this function returns.
+        return vm
+    g = _guests.get(index)
+    if g is None:
+        g = _guests[index] = GuestVM(index)
+    return g
+
+
+def default_guest() -> GuestVM:
+    """The sandbox a caller means when it doesn't name one. Everything that runs
+    a turn goes through here rather than importing `vm` directly, so which guest
+    serves a turn becomes a routing decision instead of a module import."""
+    return vm
+
+
+def all_guests() -> list[GuestVM]:
+    """Every configured slot, instantiating any not yet used — the operator's
+    view (GET /api/vm/guests) and the shutdown sweep both want the full set."""
+    return [guest_vm(i) for i in range(max(1, settings.vm_guests))]
+
+
+def live_guests() -> list[GuestVM]:
+    """Only the slots that have actually been instantiated. Used where creating a
+    guest object as a side effect would be wrong (teardown, the reaper)."""
+    return [vm, *(g for _, g in sorted(_guests.items()))]
+
+
+# module-level singleton for slot 0, driven by the vm_api router. Six modules
+# import this name; `guest_vm(0)` resolves to it rather than shadowing it.
 vm = GuestVM()
 
 
+async def teardown_all() -> None:
+    """App shutdown: never leave a guest running past the process that owns it."""
+    for g in live_guests():
+        await g.teardown()
+
+
 async def reaper_loop() -> None:
-    """Background: scrub the guest once it has gone idle (M4c). Cheap and inert
+    """Background: scrub each guest once it has gone idle (M4c). Cheap and inert
     while vm_idle_scrub_seconds is 0. Started from the app lifespan."""
     while True:
         try:
             await asyncio.sleep(settings.vm_reaper_interval_seconds)
-            await vm.reap_if_idle()
+            for g in live_guests():
+                await g.reap_if_idle()
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001 — a reaper hiccup must never kill the loop

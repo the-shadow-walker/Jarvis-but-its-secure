@@ -56,7 +56,7 @@ class _LineSock:
             pass
 
 
-async def _connect_guest(port: int) -> _LineSock:
+async def _connect_guest(port: int, guest) -> _LineSock:
     """A line-framed vsock connection to the guest, retried briefly (the PTY
     listener comes up a beat after the run-turn one on a fresh boot). Blocking
     connect in an executor — uvloop's sock_connect chokes on an AF_VSOCK tuple."""
@@ -65,17 +65,17 @@ async def _connect_guest(port: int) -> _LineSock:
     for _ in range(20):
         s = socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM)
         try:
-            await loop.run_in_executor(
-                None, s.connect, (settings.vm_guest_cid, port))
+            await loop.run_in_executor(None, s.connect, (guest.cid, port))
             return _LineSock(s)
         except OSError as e:
             last = e
             s.close()
             await asyncio.sleep(0.5)
-    raise ConnectionError(f"guest shell unreachable on vsock :{port}: {last}")
+    raise ConnectionError(
+        f"{guest.name} shell unreachable on vsock {guest.cid}:{port}: {last}")
 
 
-async def _prime_project(slug: str) -> None:
+async def _prime_project(slug: str, guest) -> None:
     """Push the project's workspace into the guest (reusing the run-turn
     server's `prime` mode) so the shell sees the same files the file tools do.
     Best-effort: a shell still opens if this fails."""
@@ -84,7 +84,7 @@ async def _prime_project(slug: str) -> None:
     import base64
     try:
         tar_b64 = base64.b64encode(workspace_xfer.build_merged_tar(slug)).decode()
-        conn = await _connect_guest(GUEST_RUNTURN_PORT)
+        conn = await _connect_guest(GUEST_RUNTURN_PORT, guest)
     except (ConnectionError, OSError):
         return
     try:
@@ -98,14 +98,20 @@ async def _prime_project(slug: str) -> None:
         conn.close()
 
 
-async def _session(client_recv, client_send, slug: str | None):
+async def _session(client_recv, client_send, slug: str | None, index: int = 0):
     """Pin the guest, bridge frames between a front door and the guest PTY,
     release on exit. `client_recv` awaits one JSON line (str) or None at EOF;
-    `client_send` takes one JSON line (str)."""
-    from .vm.lifecycle import vm, VMError
-    if not settings.guest_shell_enabled:
+    `client_send` takes one JSON line (str). `index` picks the sandbox — 0, the
+    only one a default install runs."""
+    from .vm.lifecycle import guest_vm, VMError
+    if not settings.guest_shell_enabled:            # the kill switch outranks all
         await client_send(json.dumps({"type": "o",
             "data": _b64("guest shell is disabled (JARVIS_GUEST_SHELL_ENABLED)\r\n")}))
+        return
+    try:
+        vm = guest_vm(index)                        # 'no guest N on this host'
+    except VMError as e:
+        await client_send(json.dumps({"type": "o", "data": _b64(f"{e}\r\n")}))
         return
     try:
         await vm.acquire()                          # boots if needed + pins
@@ -114,8 +120,8 @@ async def _session(client_recv, client_send, slug: str | None):
         return
     try:
         if slug:
-            await _prime_project(slug)
-        conn = await _connect_guest(settings.vm_shell_port)
+            await _prime_project(slug, vm)
+        conn = await _connect_guest(settings.vm_shell_port, vm)
     except (ConnectionError, OSError) as e:
         await client_send(json.dumps({"type": "o", "data": _b64(f"{e}\r\n")}))
         vm.release()
@@ -152,7 +158,7 @@ def _b64(text: str) -> str:
 
 
 @router.websocket("/api/guest/shell")
-async def guest_shell_ws(ws: WebSocket, slug: str | None = None):
+async def guest_shell_ws(ws: WebSocket, slug: str | None = None, guest: int = 0):
     # WebSocket can't use Depends(require_user); validate the session cookie
     if user_from_token(ws.cookies.get(COOKIE_NAME)) is None:
         await ws.close(code=4401)
@@ -169,7 +175,7 @@ async def guest_shell_ws(ws: WebSocket, slug: str | None = None):
         await ws.send_text(line)
 
     try:
-        await _session(recv, send, slug)
+        await _session(recv, send, slug, guest)
     except WebSocketDisconnect:
         pass
     finally:
@@ -181,14 +187,18 @@ async def guest_shell_ws(ws: WebSocket, slug: str | None = None):
 
 # --- Unix-socket front door for the `guest-shell` CLI -------------------------
 
-_unix_server: asyncio.AbstractServer | None = None
+_unix_servers: dict[int, asyncio.AbstractServer] = {}
 
 
-def _sock_path():
-    return settings.vm_dir / "guest-shell.sock"
+def sock_path(index: int = 0):
+    """One socket per guest. Guest 0 keeps the bare name the CLI and every
+    existing habit already use."""
+    return settings.vm_dir / (
+        "guest-shell.sock" if not index else f"guest-shell-g{index}.sock")
 
 
-async def _unix_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+async def _unix_client(reader: asyncio.StreamReader,
+                       writer: asyncio.StreamWriter, index: int = 0):
     async def recv():
         line = await reader.readline()
         return None if not line else line.decode(errors="replace")
@@ -216,7 +226,7 @@ async def _unix_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrite
             line = await reader.readline()
             return None if not line else line.decode(errors="replace")
 
-        await _session(recv_with_first, send, slug)
+        await _session(recv_with_first, send, slug, index)
     finally:
         try:
             writer.close()
@@ -225,22 +235,25 @@ async def _unix_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrite
 
 
 async def start_unix_server() -> None:
-    """Listen on the local Unix socket so an operator already on the Pi can
-    `python -m backend.cli guest-shell` into the guest. Best-effort."""
-    global _unix_server
+    """Listen on a local Unix socket per configured guest, so an operator already
+    on the Pi can `python -m backend.cli guest-shell` into one. Best-effort."""
     if not settings.guest_shell_enabled:
         return
-    path = _sock_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.unlink(missing_ok=True)
-    try:
-        _unix_server = await asyncio.start_unix_server(_unix_client, str(path))
-        path.chmod(0o600)                            # operator-only
-    except (OSError, NotImplementedError) as e:
-        print(f"[guest-shell] unix socket disabled: {e}")
+    from functools import partial
+    for index in range(max(1, settings.vm_guests)):
+        path = sock_path(index)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.unlink(missing_ok=True)
+        try:
+            _unix_servers[index] = await asyncio.start_unix_server(
+                partial(_unix_client, index=index), str(path))
+            path.chmod(0o600)                        # operator-only
+        except (OSError, NotImplementedError) as e:
+            print(f"[guest-shell] unix socket {path.name} disabled: {e}")
 
 
 async def stop_unix_server() -> None:
-    if _unix_server is not None:
-        _unix_server.close()
-    _sock_path().unlink(missing_ok=True)
+    for index, server in list(_unix_servers.items()):
+        server.close()
+        sock_path(index).unlink(missing_ok=True)
+    _unix_servers.clear()

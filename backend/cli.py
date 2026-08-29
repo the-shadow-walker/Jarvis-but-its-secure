@@ -1,6 +1,6 @@
 """Admin CLI:
   python -m backend.cli create-user <username> [password]
-  python -m backend.cli guest-shell [project-slug]   # drop into the sandbox guest
+  python -m backend.cli guest-shell [project-slug] [guest-index]  # sandbox guest
 """
 import asyncio
 import getpass
@@ -25,7 +25,7 @@ async def create_user(username: str, password: str) -> None:
     print(f"user '{username}' created/updated")
 
 
-def guest_shell(slug: str | None) -> None:
+def guest_shell(slug: str | None, index: int = 0) -> None:
     """Co-work in the guest from a terminal (you're already SSH'd to the Pi).
     Bridges this TTY to the running app's guest-shell Unix socket, which pins
     the guest and relays the PTY. Ctrl-] detaches without killing the guest."""
@@ -38,9 +38,8 @@ def guest_shell(slug: str | None) -> None:
     import struct
     import termios
     import tty
-    from .config import settings
-
-    sock_path = settings.vm_dir / "guest-shell.sock"
+    from .guest_shell import sock_path as _sock_path
+    sock_path = _sock_path(index)
     if not sock_path.exists():
         print(f"no guest-shell socket at {sock_path} — is the app running with "
               "guest_shell_enabled on?", file=sys.stderr)
@@ -131,10 +130,14 @@ def main() -> None:
         password = sys.argv[3] if len(sys.argv) > 3 else getpass.getpass("password: ")
         asyncio.run(create_user(username, password))
     elif len(sys.argv) >= 2 and sys.argv[1] == "guest-shell":
-        guest_shell(sys.argv[2] if len(sys.argv) > 2 else None)
+        # `guest-shell [project-slug] [guest-index]` — the index is optional and
+        # defaults to 0, the only guest a default install runs
+        rest = [a for a in sys.argv[2:]]
+        index = int(rest.pop()) if rest and rest[-1].isdigit() else 0
+        guest_shell(rest[0] if rest else None, index)
     else:
         print("usage: python -m backend.cli create-user <username> [password]\n"
-              "       python -m backend.cli guest-shell [project-slug]")
+              "       python -m backend.cli guest-shell [project-slug] [guest-index]")
         sys.exit(1)
 
 
