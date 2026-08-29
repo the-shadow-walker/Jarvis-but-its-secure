@@ -22,28 +22,36 @@ from . import broker, workspace_xfer
 
 GUEST_RUNTURN_PORT = 5556                   # must match jarvis_guest.server.PORT
 
-# One guest, one workspace dir per slug. Unpacking rmtree's that dir, so only
-# the FIRST concurrent operation on a slug may ship a fresh copy — later ones
-# join the existing one (like nested turns always have), and the LAST one out
-# sweeps the shared write buffer home. Single event loop: plain dict, but the
-# check+increment must happen with no await in between.
-_ws_holds: dict[str, int] = {}
+# One workspace dir per slug PER GUEST. Unpacking rmtree's that dir, so only the
+# FIRST concurrent operation on a slug in a given guest may ship a fresh copy —
+# later ones join the existing one (like nested turns always have), and the LAST
+# one out sweeps the shared write buffer home. Single event loop: plain dict, but
+# the check+increment must happen with no await in between.
+#
+# The key is (guest name, slug), not slug alone. With one guest those are the
+# same thing; with two, a top-level turn on a slug another guest already held
+# would be told owns_ws=False and would then join — and sweep home — a workspace
+# copy living in a DIFFERENT guest. That is a silent wrong-data break, not an
+# ergonomic one, so the key carries the guest even while only guest0 exists.
+_ws_holds: dict[tuple[str, str], int] = {}
 
 
-def acquire_workspace(slug: str) -> bool:
+def acquire_workspace(guest, slug: str) -> bool:
     """Register a workspace user; True when this caller should push the copy."""
-    n = _ws_holds.get(slug, 0)
-    _ws_holds[slug] = n + 1
+    key = (guest.name, slug)
+    n = _ws_holds.get(key, 0)
+    _ws_holds[key] = n + 1
     return n == 0
 
 
-def release_workspace(slug: str) -> bool:
+def release_workspace(guest, slug: str) -> bool:
     """Drop a hold; True when this caller was the last one out."""
-    n = _ws_holds.get(slug, 1) - 1
+    key = (guest.name, slug)
+    n = _ws_holds.get(key, 1) - 1
     if n <= 0:
-        _ws_holds.pop(slug, None)
+        _ws_holds.pop(key, None)
         return True
-    _ws_holds[slug] = n
+    _ws_holds[key] = n
     return False
 
 _CONFIG_KNOBS = (
@@ -62,7 +70,7 @@ async def guest_turn(conversation_id, system_prompt, history, *, rules="",
                      tool_specs=None, read_only=None, op_id=None, envelope=None,
                      active_slug=None, push_workspace=False, model_name=None,
                      base_url=None, self_check=True, max_iterations=None,
-                     rewrite_rules=True, inject_rules=True):
+                     rewrite_rules=True, inject_rules=True, guest=None):
     """Run one turn in the guest, yielding its events. Raises on a transport
     failure (connect/read) so the caller can fall back or surface an error.
 
@@ -80,7 +88,12 @@ async def guest_turn(conversation_id, system_prompt, history, *, rules="",
 
     A nested turn passes an op_id already carrying the operation's Budget; a
     top-level turn's op_id is fresh, and it inherits the operation's Budget if one
-    is in scope (contextvar) so every turn in one operation meters into one Budget."""
+    is in scope (contextvar) so every turn in one operation meters into one Budget.
+
+    `guest` is which sandbox to run in; None means guest0, the only one a
+    default install has."""
+    from .lifecycle import default_guest
+    guest_vm = guest or default_guest()
     op_id = op_id or f"guest:{conversation_id}"
     owns_budget = budget_mod.get(op_id) is None
     if owns_budget:
@@ -93,7 +106,7 @@ async def guest_turn(conversation_id, system_prompt, history, *, rules="",
         broker.register_turn(envelope)
     holds_ws = bool(push_workspace and active_slug)
     # first-in pushes a fresh copy; joiners reuse it (no await between check+set)
-    owns_ws = acquire_workspace(active_slug) if holds_ws else False
+    owns_ws = acquire_workspace(guest_vm, active_slug) if holds_ws else False
     spec = {
         "conversation_id": conversation_id,
         "system_prompt": system_prompt,
@@ -120,7 +133,6 @@ async def guest_turn(conversation_id, system_prompt, history, *, rules="",
         # guest's write buffer comes back after the turn.
         spec["workspace_tar_b64"] = base64.b64encode(
             workspace_xfer.build_merged_tar(active_slug)).decode()
-    from .lifecycle import vm as guest_vm
     await guest_vm.acquire()          # boot + pin the guest for this turn's life
     loop = asyncio.get_running_loop()
     s = socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM)
@@ -129,7 +141,7 @@ async def guest_turn(conversation_id, system_prompt, history, *, rules="",
         # on the address and chokes on an AF_VSOCK (cid, port) tuple. Once
         # connected, sock_sendall/sock_recv work fine under uvloop.
         await loop.run_in_executor(
-            None, s.connect, (settings.vm_guest_cid, GUEST_RUNTURN_PORT))
+            None, s.connect, (guest_vm.cid, GUEST_RUNTURN_PORT))
         s.setblocking(False)
         await loop.sock_sendall(s, (json.dumps(spec) + "\n").encode())
         buf = b""
@@ -156,12 +168,12 @@ async def guest_turn(conversation_id, system_prompt, history, *, rules="",
             yield ev
     finally:
         s.close()
-        if holds_ws and release_workspace(active_slug) and not owns_ws:
+        if holds_ws and release_workspace(guest_vm, active_slug) and not owns_ws:
             # last one out of a shared workspace, and the owner's turn-end pack
             # already happened (or never will): sweep the buffer home. Repeat
             # applies of the same bytes are idempotent.
             try:
-                await pull_writes(active_slug)
+                await pull_writes(active_slug, guest=guest_vm)
             except Exception:  # noqa: BLE001 — best-effort sweep
                 pass
         guest_vm.release()
@@ -171,13 +183,15 @@ async def guest_turn(conversation_id, system_prompt, history, *, rules="",
             budget_mod.release(op_id)
 
 
-async def _guest_rpc(spec: dict) -> dict | None:
+async def _guest_rpc(spec: dict, guest=None) -> dict | None:
     """One short request/response to the guest run-turn server (prime / pull)."""
+    from .lifecycle import default_guest
+    guest = guest or default_guest()
     loop = asyncio.get_running_loop()
     s = socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM)
     try:
         await loop.run_in_executor(
-            None, s.connect, (settings.vm_guest_cid, GUEST_RUNTURN_PORT))
+            None, s.connect, (guest.cid, GUEST_RUNTURN_PORT))
         s.setblocking(False)
         await loop.sock_sendall(s, (json.dumps(spec) + "\n").encode())
         buf = b""
@@ -191,20 +205,20 @@ async def _guest_rpc(spec: dict) -> dict | None:
         s.close()
 
 
-async def prime_workspace(slug: str) -> None:
+async def prime_workspace(slug: str, guest=None) -> None:
     """Push ONE fresh workspace copy for an operation whose turns will reuse it
     (orchestrator leaves fan out concurrently on one project — priming once up
     front avoids each leaf racing a fresh unpack of the shared guest dir).
     Callers hold the slug via acquire_workspace and prime only when first in."""
     tar_b64 = base64.b64encode(workspace_xfer.build_merged_tar(slug)).decode()
     await _guest_rpc({"mode": "prime", "active_slug": slug,
-                      "workspace_tar_b64": tar_b64})
+                      "workspace_tar_b64": tar_b64}, guest)
 
 
-async def pull_writes(slug: str) -> None:
+async def pull_writes(slug: str, guest=None) -> None:
     """Pull the operation's accumulated guest write buffer and apply it host-side
     (secret refusal + advisory diff gate) — the counterpart to prime_workspace."""
-    ev = await _guest_rpc({"mode": "pull", "active_slug": slug})
+    ev = await _guest_rpc({"mode": "pull", "active_slug": slug}, guest)
     if ev and ev.get("type") == "staged":
         await workspace_xfer.apply_guest_writes(
             slug, base64.b64decode(ev.get("tar_b64") or ""))

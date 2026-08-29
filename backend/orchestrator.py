@@ -255,16 +255,18 @@ async def run_job(job_id: str, brief: str, project: str, *, peak: bool = False,
     owns_ws = False
     if prime_guest:
         from .vm.guest_turn import acquire_workspace, prime_workspace
-        from .vm.lifecycle import vm as guest_vm
+        from .vm.lifecycle import default_guest
+        guest_vm = default_guest()
         try:
             await guest_vm.acquire()        # pin the guest for the whole job
             acquired = True
-            # only prime when first in on this slug — a concurrent chat turn on
-            # the same project may already own the guest copy (re-priming would
-            # wipe its in-flight edits); we then reuse it like a nested turn.
-            owns_ws = acquire_workspace(project)
+            # only prime when first in on this slug IN THIS GUEST — a concurrent
+            # chat turn on the same project may already own that guest's copy
+            # (re-priming would wipe its in-flight edits); we then reuse it like
+            # a nested turn.
+            owns_ws = acquire_workspace(guest_vm, project)
             if owns_ws:
-                await prime_workspace(project)
+                await prime_workspace(project, guest_vm)
         except Exception:  # noqa: BLE001 — fall through; leaves surface guest errors
             pass
     try:
@@ -275,10 +277,14 @@ async def run_job(job_id: str, brief: str, project: str, *, peak: bool = False,
         runtime.web_session.reset(wtoken)
         if acquired:
             from .vm.guest_turn import pull_writes, release_workspace
-            from .vm.lifecycle import vm as guest_vm
-            if release_workspace(project):     # last out sweeps the shared buffer
+            # NOTE the asymmetry with guest_turn's own sweep, which is deliberate
+            # and load-bearing: there the LAST out sweeps only if it is not the
+            # owner (the owner's turn-end `staged` pack already brought its edits
+            # home). A job primes out-of-band and gets no such pack, so it sweeps
+            # whenever it is last out, owner or not.
+            if release_workspace(guest_vm, project):
                 try:
-                    await pull_writes(project)
+                    await pull_writes(project, guest_vm)
                 except Exception:  # noqa: BLE001 — reconcile is best-effort
                     pass
             guest_vm.release()

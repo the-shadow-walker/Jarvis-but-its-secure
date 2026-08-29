@@ -89,7 +89,14 @@ _EXTERNAL_RE = re.compile(r"GUEST-NET-EXTERNAL-REACHABLE: (True|False)")
 
 
 class GuestVM:
-    def __init__(self):
+    """One sandbox guest. `index` is its slot: 0 is THE guest — the one every
+    existing caller means, with today's CID, file names and behaviour unchanged.
+    A host configured for more gets 1, 2, ... each with its own CID and its own
+    overlay/console/EFI files, so nothing about a second instance is implicit."""
+
+    def __init__(self, index: int = 0):
+        self.index = index
+        self.name = f"guest{index}"
         self._proc: asyncio.subprocess.Process | None = None
         # lifecycle transitions (boot/teardown/reap) are serialized so the idle
         # reaper can never nuke a guest a turn is starting on, and two turns never
@@ -100,6 +107,12 @@ class GuestVM:
         self._idle_since: float | None = None
         self._booted_at: float | None = None
         self._rebuilding = False
+
+    @property
+    def cid(self) -> int:
+        """This guest's vsock CID. A property, not a snapshot, so tests and the
+        env-file config keep working by moving settings.vm_guest_cid."""
+        return settings.vm_guest_cid + self.index
 
     def running(self) -> bool:
         return self._proc is not None and self._proc.returncode is None
@@ -392,6 +405,13 @@ class GuestVM:
 
 # module-level singleton, driven by the vm_api router
 vm = GuestVM()
+
+
+def default_guest() -> GuestVM:
+    """The sandbox a caller means when it doesn't name one. Everything that runs
+    a turn goes through here rather than importing `vm` directly, so which guest
+    serves a turn becomes a routing decision instead of a module import."""
+    return vm
 
 
 async def reaper_loop() -> None:
