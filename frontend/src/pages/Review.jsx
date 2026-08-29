@@ -5,6 +5,8 @@ import SecurityBoard from '../SecurityBoard.jsx'
 import TriagePanel from '../TriagePanel.jsx'
 import { notifyError } from '../notify.js'
 import { useAsk } from '../ask.jsx'
+import { sevClass, ts } from '../format.js'
+import EmptyState from '../components/EmptyState.jsx'
 import Page from '../components/Page.jsx'
 
 // One cross-project queue of everything awaiting the operator: git commit
@@ -22,11 +24,6 @@ import Page from '../components/Page.jsx'
 // SecurityBoard, which is where the flagged code, the diff, the directory and
 // the traffic live. A security toast deep-links straight into it via router
 // state (`openEvent`), so a card that drains away is still recoverable.
-
-const SEV = { info: 'info', warn: 'warn', warning: 'warn', critical: 'crit', crit: 'crit' }
-const sevClass = (s) => SEV[String(s || 'info').toLowerCase()] || 'info'
-
-function ts(s) { return s ? String(s).replace('T', ' ').slice(0, 16) : '' }
 
 export function ReviewQueue({ slug }) {
   const [slugs, setSlugs] = useState(slug ? [slug] : null)  // project slugs to cover
@@ -166,7 +163,7 @@ export function ReviewQueue({ slug }) {
   return (
     <div className="review-queue">
       {total === 0 && (
-        <div className="dim center-pad">nothing waiting on you — all clear ✓</div>
+        <EmptyState pad>nothing waiting on you — all clear ✓</EmptyState>
       )}
 
       {/* ---- git commit requests (deliberately no bulk verdict: each one is
