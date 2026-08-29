@@ -32,6 +32,13 @@ from .memory import assemble_system_prompt, get_active_project
 router = APIRouter(prefix="/api/agents", tags=["agents"],
                    dependencies=[Depends(require_user)])
 
+# Its own prefix, not /api/agents/messages: agents_api's `GET /api/agents/{slug}`
+# is registered first and would swallow a one-segment sibling as an agent named
+# "messages". A message is also not an agent's sub-resource — it is addressed to
+# a running turn, which may be a plain chat with no agent at all.
+messages_router = APIRouter(prefix="/api/messages", tags=["agents"],
+                            dependencies=[Depends(require_user)])
+
 
 class RunAgent(BaseModel):
     task: str
@@ -162,11 +169,21 @@ async def _open_run(db, agent: dict, task: str,
     """Create the conversation for an agent run and record the task. Returns
     (conversation_id, resolved project slug) — the caller needs the resolved
     slug (not the _USE_DB sentinel) for the autonomy lookup."""
+    from . import runtime
     if active is _USE_DB:
         active = await _inherited_or_global(db)
     title = f"[{agent['name']}] " + " ".join(task.split())[:40]
+    # The run tree was disconnected exactly where Jarvis delegates: the
+    # orchestrator and research both pass `parent`, and this path — every
+    # spawn_agent and spawn_temp_agent child — passed nothing, so a chat that
+    # summoned an agent produced an orphan node with no way back to the
+    # conversation that asked for it. `runtime.conversation_id` is the turn that
+    # dispatched the spawn tool (the broker restores it from the op_id envelope
+    # for a guest-run turn), and it is None for a schedule, which is correct:
+    # a scheduled run really has no parent conversation.
     conversation_id = await open_conversation(
-        db, project=active, title=title, kind="agent", commit=False)
+        db, project=active, title=title, kind="agent", commit=False,
+        parent=runtime.conversation_id.get())
     await db.execute(
         "INSERT INTO messages (conversation_id, role, content) VALUES (?, 'user', ?)",
         (conversation_id, task))
@@ -423,8 +440,18 @@ async def _run_interactive(conversation_id: int, agent: dict, task: str,
                 "summary": " ".join((final_content or "").split())[:180]})
         except Exception:                        # noqa: BLE001 — never break the run
             pass
-        bus.publish(chan, bus.JOB_END)
+        # ORDER MATTERS, and it was backwards: drop the running flag, THEN
+        # signal end. `resume_run_stream` subscribes and then checks the flag,
+        # so with the end signal published first, a re-attach landing in the
+        # window between the two saw a run that was still "active", subscribed
+        # to a channel whose terminal event had already gone out to nobody, and
+        # waited on `q.get()` forever — the panel spinning on a finished run
+        # until the service restarted. Popping first makes the flag a promise:
+        # if a subscriber still sees it, JOB_END is guaranteed to be ahead of it
+        # in the queue. chat.py has documented this ordering all along
+        # (chat.py:_run_chat_turn's finally); this path had it inverted.
         _active_runs.pop(conversation_id, None)
+        bus.publish(chan, bus.JOB_END)
         if db is not None:
             await db.close()
         runtime.web_session.reset(wtoken)
@@ -478,6 +505,31 @@ async def stop_run(conversation_id: int):
         return {"stopped": False}
     task.cancel()
     return {"stopped": True}
+
+
+@messages_router.get("")
+async def list_agent_messages(limit: int = 50):
+    """Inter-agent messages, newest first, plus who is addressable right now.
+
+    The operator's window onto a channel that is otherwise invisible: an
+    undelivered row here is a message waiting for an agent that has not run
+    since, which is the one failure mode worth being able to see. Read-only —
+    the GUI for this is deliberately not built yet (a concurrent session owns
+    the frontend), but the data a panel would need is all here."""
+    from . import agentmsg
+    db = await get_db()
+    try:
+        async with db.execute(
+            "SELECT id, from_conversation_id, from_label, to_conversation_id, "
+            "to_agent_slug, project_slug, body, created_at, delivered_at, "
+            "delivered_to FROM agent_messages ORDER BY id DESC LIMIT ?",
+            (max(1, min(limit, 200)),)) as cur:
+            rows = [dict(r) for r in await cur.fetchall()]
+        peers = await agentmsg.live_peers(db)
+    finally:
+        await db.close()
+    return {"messages": rows, "running": peers,
+            "undelivered": sum(1 for r in rows if r["delivered_at"] is None)}
 
 
 @router.get("/notices/stream")

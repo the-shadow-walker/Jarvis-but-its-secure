@@ -208,9 +208,16 @@ async def run_job(job_id: str, brief: str, project: str, *, peak: bool = False,
     try:
         db = await get_db()
         try:
+            # parent = the turn that deployed this team. Same reason research
+            # sets it: the chat -> job link has to survive a reload, and
+            # `bus.announce_job` is a fire-and-forget event nothing stores.
+            # The head still reads as depth 0 in the run tree — _depths only
+            # walks nodes sharing this job_id, and the chat is not one.
+            from . import runtime
             root_id = await open_conversation(
                 db, project=project, title=f"[head] {(title or brief)[:60]}",
-                kind="head", job_id=job_id)
+                kind="head", job_id=job_id,
+                parent=runtime.conversation_id.get())
         finally:
             await db.close()
     except Exception as e:

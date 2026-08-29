@@ -117,6 +117,25 @@ async def list_conversations(project: str | None = None):
                               for r in rows]}
 
 
+async def _drop_references(db, conversation_id: int) -> None:
+    """Clear every foreign key pointing AT this conversation, so deleting it
+    doesn't hit `FOREIGN KEY constraint failed` (get_db sets foreign_keys=ON).
+
+    Two columns reference conversations, and WP5 gave both teeth. `agent_messages`
+    is new. `parent_conversation_id` is not — but until spawned agents started
+    recording their parent, a chat never HAD a child row, so deleting one could
+    never fail; now a chat that summoned an agent has one. The child keeps its
+    own transcript and rollup and simply becomes a root, which is the honest
+    outcome: the run happened, the conversation that asked for it is gone."""
+    await db.execute(
+        "UPDATE conversations SET parent_conversation_id = NULL "
+        "WHERE parent_conversation_id = ?", (conversation_id,))
+    await db.execute(
+        "DELETE FROM agent_messages WHERE from_conversation_id = ? "
+        "OR to_conversation_id = ? OR delivered_to = ?",
+        (conversation_id, conversation_id, conversation_id))
+
+
 @router.delete("/conversations/{conversation_id}")
 async def delete_conversation(conversation_id: int):
     db = await get_db()
@@ -126,6 +145,7 @@ async def delete_conversation(conversation_id: int):
         ) as cur:
             if not await cur.fetchone():
                 raise HTTPException(status_code=404, detail="no such conversation")
+        await _drop_references(db, conversation_id)
         await db.execute("DELETE FROM tool_calls WHERE conversation_id = ?", (conversation_id,))
         await db.execute("DELETE FROM messages WHERE conversation_id = ?", (conversation_id,))
         await db.execute("DELETE FROM conversations WHERE id = ?", (conversation_id,))
@@ -188,6 +208,17 @@ async def get_messages(conversation_id: int):
             "WHERE conversation_id = ? ORDER BY id", (conversation_id,)
         ) as cur:
             calls = [dict(r) for r in await cur.fetchall()]
+        # jobs this chat launched. The link used to exist ONLY as
+        # `bus.announce_job`'s one-off bus event, so a reload lost the pointer
+        # to the run and the JobTree could never be remounted. The child node
+        # now carries parent_conversation_id, which makes it a query.
+        async with db.execute(
+            "SELECT id AS root_id, job_id, summary AS title, kind, "
+            "       rollup IS NOT NULL AS finished "
+            "FROM conversations WHERE parent_conversation_id = ? "
+            "AND job_id IS NOT NULL ORDER BY id", (conversation_id,)
+        ) as cur:
+            jobs = [dict(r) for r in await cur.fetchall()]
     finally:
         await db.close()
     # attach each turn's tool calls to the assistant message that closed the
@@ -219,7 +250,8 @@ async def get_messages(conversation_id: int):
     # even though half its work is already persisted
     running = conversation_id in _active_turns
     pending = [_act(c) for c in calls[ci:]] if running else []
-    return {"messages": rows, "running": running, "pending_activity": pending}
+    return {"messages": rows, "running": running, "pending_activity": pending,
+            "jobs": jobs}
 
 
 # In-flight turns, keyed by conversation. The dict entry is both the "is a
@@ -515,6 +547,13 @@ async def _run_chat_turn(conversation_id: int, ephemeral: bool,
                             # an agent definition may cap its own rounds; None
                             # keeps the normal chat cap
                             max_iterations=(agent_def or {}).get("max_iterations") or None,
+                            # a chat thread is addressable — by its conversation
+                            # id, and by its agent slug when WP4 bound one. An
+                            # ephemeral turn is not: nothing about it is stored,
+                            # so a message delivered into it would leave the
+                            # sender's row marked delivered against a transcript
+                            # the finally block is about to erase.
+                            inbox=not ephemeral,
                             # voice local tier: run on the operator's ollama.
                             # The guest never dials it — the host gateway makes
                             # the call, so base_url is honoured host-side.
@@ -612,6 +651,12 @@ async def _run_chat_turn(conversation_id: int, ephemeral: bool,
                             fh.write(f"**{m['role']}**:\n\n{m['content']}\n\n")
             except Exception:  # noqa: BLE001 — recovery dump is best-effort
                 pass
+            # the incognito wipe deletes the conversation row itself, so it has
+            # to clear inbound foreign keys first for exactly the same reason
+            # delete_conversation does — and a FK failure raised HERE, inside
+            # the finally, would skip the contextvar resets, the _active_turns
+            # eviction and bus.close_job, bricking the conversation.
+            await _drop_references(db, conversation_id)
             for tbl in ("tool_calls", "messages", "conversations"):
                 col = "id" if tbl == "conversations" else "conversation_id"
                 await db.execute(f"DELETE FROM {tbl} WHERE {col} = ?", (conversation_id,))

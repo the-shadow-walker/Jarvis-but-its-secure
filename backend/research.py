@@ -207,7 +207,14 @@ async def run_research(topic: str, project: str, n_angles: int = 3,
         budget_mod.register(job_id, b)
         optok = budget_mod.active_op_id.set(job_id)
     try:
-        head = await _node(project, None, job_id, "head", f"Research: {topic}")
+        # parent = the turn that asked for this research, so the chat -> job
+        # link is a persisted row rather than only `bus.announce_job`'s one-off
+        # event. Reloading the chat used to lose the pointer to the job it
+        # launched; now it is recoverable from conversations.parent_conversation_id.
+        # None outside a turn (a scheduled research run), which is correct.
+        from . import runtime
+        head = await _node(project, runtime.conversation_id.get(), job_id,
+                           "head", f"Research: {topic}")
         bus.publish(job_id, {"type": "job_start", "job_id": job_id, "root_id": head})
         bus.announce_job(job_id, head, f"Research: {topic}")
         bus.publish(job_id, {"type": "node_spawned", "node_id": head, "parent_id": None,
