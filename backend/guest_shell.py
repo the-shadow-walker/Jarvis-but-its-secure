@@ -104,14 +104,14 @@ async def _session(client_recv, client_send, slug: str | None, index: int = 0):
     `client_send` takes one JSON line (str). `index` picks the sandbox — 0, the
     only one a default install runs."""
     from .vm.lifecycle import guest_vm, VMError
-    try:
-        vm = guest_vm(index)
-    except VMError as e:
-        await client_send(json.dumps({"type": "o", "data": _b64(f"{e}\r\n")}))
-        return
-    if not settings.guest_shell_enabled:
+    if not settings.guest_shell_enabled:            # the kill switch outranks all
         await client_send(json.dumps({"type": "o",
             "data": _b64("guest shell is disabled (JARVIS_GUEST_SHELL_ENABLED)\r\n")}))
+        return
+    try:
+        vm = guest_vm(index)                        # 'no guest N on this host'
+    except VMError as e:
+        await client_send(json.dumps({"type": "o", "data": _b64(f"{e}\r\n")}))
         return
     try:
         await vm.acquire()                          # boots if needed + pins
