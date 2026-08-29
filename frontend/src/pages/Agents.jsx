@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { api } from '../api.js'
+import { SaveButton } from '../components/Button.jsx'
+import EmptyState from '../components/EmptyState.jsx'
 import { notifyError } from '../notify.js'
 import { useAsk } from '../ask.jsx'
 import Page from '../components/Page.jsx'
@@ -190,7 +192,7 @@ export default function Agents() {
               {a.model && <span className="tag">{a.model}</span>}
             </li>
           ))}
-          {agents.length === 0 && <li className="dim">none yet — press n</li>}
+          {agents.length === 0 && <EmptyState as="li">none yet — press n</EmptyState>}
         </ul>
         {trash.length > 0 && (
           <details className="trash-bin">
@@ -214,13 +216,13 @@ export default function Agents() {
       </aside>
       <main className="editor-pane">
         {!agent ? (
-          <div className="dim center-pad">select an agent, or press <kbd>n</kbd> to create one</div>
+          <EmptyState pad>select an agent, or press <kbd>n</kbd> to create one</EmptyState>
         ) : (
           <div className="agent-form">
             <div className="pane-head">
               <h3>{agent.name}</h3>
               <button className="ghost danger" onClick={del}>delete</button>
-              <button onClick={save} disabled={!dirty}>{dirty ? 'Save' : 'Saved'}</button>
+              <SaveButton dirty={dirty} onSave={save} />
             </div>
             <div className="field-row">
               <label>name

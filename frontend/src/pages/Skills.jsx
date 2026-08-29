@@ -1,5 +1,7 @@
 import { useEffect, useState } from 'react'
 import { api } from '../api.js'
+import { SaveButton } from '../components/Button.jsx'
+import EmptyState from '../components/EmptyState.jsx'
 import Page from '../components/Page.jsx'
 
 // Skill authoring as a fill-out form: the fields generate valid frontmatter
@@ -82,7 +84,7 @@ export default function Skills() {
               <span className="tag">{s.enabled ? 'granted' : 'not granted'}</span>
             </li>
           ))}
-          {skills.length === 0 && <li className="dim">none yet</li>}
+          {skills.length === 0 && <EmptyState as="li">none yet</EmptyState>}
         </ul>
         <p className="dim small">a skill teaches Jarvis a procedure: it sees the
           name + "use when" every turn, and gets the full instructions only when
@@ -90,14 +92,14 @@ export default function Skills() {
       </aside>
       <main className="editor-pane">
         {!selected ? (
-          <div className="dim center-pad">select or create a skill</div>
+          <EmptyState pad>select or create a skill</EmptyState>
         ) : (
           <>
             <div className="pane-head">
               <h3>{selected}</h3>
               <button className="ghost" onClick={() => setRaw((v) => !v)}>
                 {raw ? 'form editor' : 'edit raw'}</button>
-              <button onClick={save} disabled={!dirty}>{dirty ? 'Save' : 'Saved'}</button>
+              <SaveButton dirty={dirty} onSave={save} />
             </div>
             {raw || !fields ? (
               <textarea className="md-editor grow" spellCheck={false} value={content}

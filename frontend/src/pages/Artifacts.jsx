@@ -1,5 +1,7 @@
 import { useEffect, useState } from 'react'
 import { api } from '../api.js'
+import { SaveButton } from '../components/Button.jsx'
+import EmptyState from '../components/EmptyState.jsx'
 import Md from '../Md.jsx'
 import { notify } from '../notify.js'
 import { useAsk } from '../ask.jsx'
@@ -102,7 +104,10 @@ export default function Artifacts() {
       </aside>
       <main className="editor-pane">
         {!sel ? (
-          <p className="dim center-pad">pick a file to view or edit</p>
+          /* a paragraph, not EmptyState's default div: it sits directly in
+             the editor pane and a paragraph's own margins are part of where
+             this line lands */
+          <EmptyState as="p" pad>pick a file to view or edit</EmptyState>
         ) : (
           <>
             <div className="pane-head">
@@ -111,7 +116,7 @@ export default function Artifacts() {
                 <button className="ghost" onClick={() => setPreview((v) => !v)}>
                   {preview ? '✎ edit' : '👁 preview'}</button>
               )}
-              <button onClick={save} disabled={!dirty}>{dirty ? 'Save' : 'Saved'}</button>
+              <SaveButton dirty={dirty} onSave={save} />
             </div>
             {isMd && preview
               ? <div className="md-preview grow"><Md text={content} /></div>

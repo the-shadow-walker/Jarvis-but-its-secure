@@ -1,5 +1,7 @@
 import { useEffect, useState } from 'react'
 import { api } from '../api.js'
+import { SaveButton } from '../components/Button.jsx'
+import EmptyState from '../components/EmptyState.jsx'
 import { notifyError } from '../notify.js'
 import { useAsk } from '../ask.jsx'
 import Page from '../components/Page.jsx'
@@ -147,7 +149,7 @@ export default function Context() {
              title="API keys the agent can use via {{secret:NAME}} in web_read (on bound hosts) but never read">
           Secrets</div>
         <ul className="file-list">
-          {secrets.length === 0 && <li className="dim">none saved</li>}
+          {secrets.length === 0 && <EmptyState as="li">none saved</EmptyState>}
           {secrets.map((s) => (
             <li key={s.name} title={s.hosts?.length
                   ? `web: ${s.hosts.join(', ')}` : 'no web hosts bound — unusable'}>
@@ -193,7 +195,7 @@ export default function Context() {
               {noteMeta && !noteMeta.trusted && (
                 <button className="ghost" title="mark this note trusted"
                         onClick={() => promote(noteMeta.name)}>Promote to trusted</button>)}
-              <button onClick={save} disabled={!dirty}>{dirty ? 'Save' : 'Saved'}</button>
+              <SaveButton dirty={dirty} onSave={save} />
             </div>
             <textarea className="md-editor grow" value={content}
                       onChange={(e) => { setContent(e.target.value); setDirty(true) }} />
