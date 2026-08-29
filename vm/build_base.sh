@@ -129,6 +129,12 @@ echo "== [3/5] provision boot (KVM, SLIRP net for cloud-init only) =="
 cp pristine.qcow2 base-work.qcow2
 qemu-img resize base-work.qcow2 "$DISK_SIZE"
 cp "$FW_VARS" efi_vars_build.fd
+# 1800s ASSUMES HARDWARE ACCELERATION. A provision boot takes ~9 min under
+# MTTCG and a couple of minutes under KVM, so this is generous for either — but
+# on an unaccelerated or heavily loaded host it can fire mid-provision, and the
+# [4/5] check below then reports "provisioning may have failed", which reads as
+# a broken image rather than a stopwatch. If you are diagnosing that message,
+# check the tail of provision-console.log for a poweroff before assuming a bug.
 timeout 1800 "$QEMU_BIN" \
   "${QEMU_MACHINE[@]}" \
   -smp 2 -m 1024 \
