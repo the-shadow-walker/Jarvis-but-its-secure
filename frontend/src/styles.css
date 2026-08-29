@@ -112,14 +112,19 @@
   --font-mono: ui-monospace, Menlo, monospace;
 
   /* Breakpoints. CSS custom properties are NOT usable inside @media, so these
-     cannot drive the queries below — they are the single written source of
-     the four widths this app actually uses, readable from JS via
-     getComputedStyle. WP3 collapses the queries and Chat.jsx's hardcoded 768
-     onto them. */
-  --bp-wide: 1024px;    /* nav collapses to the drawer */
-  --bp-tablet: 768px;   /* the phone/desktop split, also hardcoded in Chat.jsx */
-  --bp-phone: 640px;
-  --bp-narrow: 400px;
+     cannot drive the queries below — they are the written source of the widths
+     this app uses, readable from JS via getComputedStyle. The queries repeat
+     the numbers literally, and `src/breakpoints.js` is what JS reads; the three
+     agree, and every @media below is one of them.
+
+     There were four. 640 held exactly two rules — the modal going full-bleed
+     and the music player going edge-to-edge — and both are "this is a phone"
+     decisions the rest of the app already spells 768 (the SecurityBoard modal
+     went full-bleed at 768 while the generic modal did it at 640, so the app
+     had two widths for one idea). 640 is gone. */
+  --bp-wide: 1024px;    /* the bar can't hold the links; they move to the drawer */
+  --bp-phone: 768px;    /* one column, 16px controls, safe-area gutters */
+  --bp-narrow: 400px;   /* the last squeeze: smaller wordmark, tighter padding */
 
   /* ---- surfaces that are deliberately theme-independent ----
      Not theme bugs, despite looking like hardcoded colours: an untrusted HTML
@@ -309,6 +314,21 @@ nav a.active, .rail-links > a.active { color: var(--text); background: var(--pan
   transform-origin: bottom left;
   animation: rise-in 0.16s cubic-bezier(0.21, 1.02, 0.55, 1) both; }
 
+/* ---- grouped destinations ----
+   The overflow menu and the phone drawer render the same grouped list (nav.jsx
+   NavGroupList), so the heading style is written once and both wear it. Before
+   this the menu was eight unlabelled rows in no order, which is where Network,
+   Context and Logs were effectively hidden.
+   A div, not an <h*>: it labels a menu, and the group carries the accessible
+   name — putting real headings in a popover would wreck the page outline. */
+.nav-group { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.nav-group + .nav-group { margin-top: var(--sp-5); }
+.nav-group-label {
+  font-size: var(--fs-xs); text-transform: uppercase; letter-spacing: 0.08em;
+  color: var(--dim); font-weight: 600; padding: var(--sp-3) var(--sp-5) var(--sp-1);
+  user-select: none;
+}
+
 /* overflow menu ("More") */
 .more-wrap { margin-left: 2px; }
 .nav-more {
@@ -321,8 +341,12 @@ nav a.active, .rail-links > a.active { color: var(--text); background: var(--pan
 }
 .nav-more .chev { transform: rotate(90deg); font-size: 12px; }
 .nav-more .chev.open { transform: rotate(-90deg); }
-.more-drop { width: 210px; }
+/* `.more-drop { width: 210px }` used to sit here and had never applied: it is
+   declared before `.notif-drop`'s own 340px and loses on order, so the menu has
+   always been 340 wide. Removed rather than moved — 340 is the width every
+   other popover in the bar uses, and the grouped rows want it. */
 .more-item { text-decoration: none; }
+.more-item .nav-label { flex: 1; min-width: 0; }
 .more-item.active { color: var(--accent); }
 .more-drop .more-logout {
   background: none; color: var(--dim); width: 100%; text-align: left;
@@ -466,6 +490,14 @@ input:focus, textarea:focus { border-color: var(--accent);
 .grow { flex: 1; }
 .center { display: flex; align-items: center; justify-content: center; height: 80vh; }
 .center-pad { padding: 40px; text-align: center; }
+.center-link { text-align: center; margin: 0; }
+.center-link a { color: var(--accent); }
+/* A lazily-loaded route's chunk, in flight. It paints nothing on purpose: the
+   chunks are prefetched on idle, so this is on screen for a few tens of
+   milliseconds if ever, and a spinner that appears and vanishes that fast reads
+   as a flicker rather than as progress. It still claims the space so the page
+   below does not jump when the chunk lands. */
+.route-pending { flex: 1; min-height: 0; }
 .dim { color: var(--dim); }
 .warn { color: var(--amber); font-size: 12.5px; }
 .error { color: var(--red); font-size: 13px; }
@@ -491,18 +523,55 @@ input:focus, textarea:focus { border-color: var(--accent);
 }
 .card.flush, .panel.flush { padding: 0; overflow: hidden; }
 
-/* page header: <h2> + optional lede + right-aligned actions. Matches .cu-head,
-   which is the one page that already did this properly. */
-.page-head { display: flex; align-items: center; gap: var(--sp-7);
-  margin-bottom: var(--sp-2); }
-.page-head > :first-child { margin: 0; flex: 1; min-width: 0; }
+/* page header: the page's <h1> + optional lede + right-aligned actions.
+   Modelled on .cu-head, which was the one page that already did this properly;
+   .cu-head and .ws-head are folded into the same rules below rather than
+   restyled, so ComputerUse and Workspace keep their markup and stop being
+   two more spellings of this. */
+.page-head, .cu-head, .ws-head {
+  display: flex; align-items: center; gap: var(--sp-7); margin-bottom: var(--sp-2);
+}
+.page-head > :first-child, .cu-head > :first-child { margin: 0; flex: 1; min-width: 0; }
+/* .ws-head is the exception: its title sits at natural width and a `.hint`
+   with margin-left:auto does the pushing, so growing the title here would
+   shove the workspace's own controls across the bar. */
+.ws-head > :first-child { margin: 0; }
 .page-lede { margin: 0 0 var(--sp-7); color: var(--dim); }
+/* One size for a page title, whatever element carries it. It was UA-default
+   before: 30px on ComputerUse's <h1>, 22.5px on the five <h2> pages, and an
+   explicit 18px on Workspace and Network — the two that had been hand-tuned.
+   18px is the one that was chosen on purpose, so it is the one that wins. */
+.page-head h1, .page-head h2, .cu-head h1, .ws-head h1, .ws-head h2 {
+  font-size: var(--fs-xl); font-weight: 600; line-height: var(--lh-tight);
+}
+
+/* ---- the full-height page shell ----
+   The app has two page geometries and had no name for the second. `.page`
+   scrolls itself inside a 960px column; the other kind fills the viewport and
+   lets its children scroll — .split-layout, .net-page and .workspace all
+   hand-rolled it. `.page-shell` is that shape, and its header is a bar across
+   the top, which is what .ws-head already was. */
+.page-shell { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+.page-shell > .page-head, .ws-head {
+  flex-shrink: 0; margin: 0; gap: var(--sp-7);
+  padding: var(--sp-5) var(--sp-9);
+  border-bottom: 1px solid var(--border); background: var(--bg-soft);
+}
+.page-shell > .page-lede { flex-shrink: 0; margin: 0;
+  padding: var(--sp-4) var(--sp-9) 0; }
+.page-shell > .split-layout { flex: 1; min-height: 0; }
+/* the actions half of a header must not be squeezed by a long title */
+.page-head-actions { display: flex; align-items: center; gap: var(--sp-5);
+  flex-shrink: 0; min-width: 0; flex-wrap: wrap; }
 
 /* toolbar: the .row shape without .row's vertical margin, for use as a
    header strip inside a card or pane. `.pane-head` is the same thing and
    stays where it is until WP2 folds the call sites over. */
 .toolbar { display: flex; align-items: center; gap: var(--sp-5);
   flex-wrap: wrap; min-width: 0; }
+/* the Logs sidebar's transcripts/cost switch, which was a `.row` carrying
+   `style={{ gap: 6, marginBottom: 8 }}` — the app's one inline layout style */
+.log-views { gap: var(--sp-3); margin-bottom: var(--sp-4); }
 .toolbar > .toolbar-title { flex: 1; min-width: 0; margin: 0;
   font-size: var(--fs-lg); overflow: hidden; text-overflow: ellipsis;
   white-space: nowrap; }
@@ -559,7 +628,10 @@ input:focus, textarea:focus { border-color: var(--accent);
   gap: var(--sp-4); padding: var(--sp-6) var(--sp-8);
   border-top: 1px solid var(--border); }
 .modal-foot .grow { flex: 1; }
-@media (max-width: 640px) {
+/* --bp-phone. Was 640, alone in the file: .sbd-modal makes the identical
+   full-bleed move at 768, so between 641 and 768 one modal filled the screen
+   and the other sat in a scrim. */
+@media (max-width: 768px) {
   /* full-bleed on a phone: a padded scrim wastes a quarter of the screen */
   .modal-scrim { padding: 0; }
   .modal { width: 100%; height: 100%; max-height: none; border-radius: 0;
@@ -860,7 +932,9 @@ input:focus, textarea:focus { border-color: var(--accent);
   0%, 100% { transform: scale(0.968); box-shadow: 0 8px 36px var(--orb-glow); }
   50% { transform: scale(1.055); box-shadow: 0 14px 66px var(--orb-glow); }
 }
-.chat-empty h2 { margin: 0; font-size: 22px; max-width: 480px; text-align: center; }
+/* the greeting is the chat page's <h1> now; the size is unchanged */
+.chat-empty h1 { margin: 0; font-size: 22px; max-width: 480px; text-align: center;
+  font-weight: 600; line-height: var(--lh-tight); }
 /* phone, fresh chat: the toolbar is gone and its two controls — project and
    temporary — sit centred under the orb and the greeting instead */
 .chat-empty .empty-controls {
@@ -1028,11 +1102,9 @@ input:focus, textarea:focus { border-color: var(--accent);
 
 /* ---- workspace control board ---- */
 .workspace { display: flex; flex-direction: column; flex: 1; min-height: 0; }
-.ws-head {
-  display: flex; gap: 14px; align-items: center; padding: 10px 20px;
-  border-bottom: 1px solid var(--border); background: var(--bg-soft);
-}
-.ws-head h2 { margin: 0; font-size: 18px; }
+/* .ws-head's own layout, padding, border, background and title size are the
+   shared page-header rules now (see `.page-shell > .page-head, .ws-head`) —
+   this header was the model for them. Only what is peculiar to it is left. */
 .ws-head .hint { font-size: 12px; margin-left: auto; }
 .board {
   position: relative; flex: 1; overflow: auto; min-height: 0;
@@ -1488,13 +1560,15 @@ kbd {
 .tag.untrusted { color: var(--amber); border-color: var(--amber); }
 .vm-stale-badge { background: var(--amber); }
 
-/* ---- Network page (live egress) ---- */
-.net-page { display: flex; flex-direction: column; flex: 1; min-height: 0;
-  padding: 16px 20px; gap: 12px; }
-.net-head { display: flex; align-items: center; gap: 10px; }
-.net-head h2 { margin: 0; font-size: 18px; }
-.net-head select { padding: 4px 8px; font-size: 13px; }
-.net-body { display: flex; gap: 16px; flex: 1; min-height: 0; }
+/* ---- Network page (live egress) ----
+   `.page-shell` owns the full-height column and the header bar now; .net-page
+   used to hand-roll both, and its own `.net-head` was a third spelling of the
+   page header (the others being .page-head and .ws-head). The page's padding
+   moved onto .net-body, because the header bar brings its own. */
+.net-page { gap: var(--sp-6); }
+.page-head-actions select { padding: 4px 8px; font-size: 13px; }
+.net-body { display: flex; gap: 16px; flex: 1; min-height: 0;
+  padding: 0 var(--sp-9) var(--sp-8); }
 .net-feed { flex: 2; min-width: 0; display: flex; flex-direction: column;
   min-height: 0; gap: 6px; }
 .net-feed-list { flex: 1; min-height: 0; overflow-y: auto; padding-right: 4px; }
@@ -1590,11 +1664,17 @@ kbd {
   .nav-drawer a {
     color: var(--dim); text-decoration: none;
     padding: 13px 14px; font-size: 15px; border-radius: 10px;
-    min-height: var(--tap); display: flex; align-items: center;
+    min-height: var(--tap); display: flex; align-items: center; gap: var(--sp-6);
     transition: color 0.15s, background 0.15s;
   }
   .nav-drawer a:hover { color: var(--text); background: var(--panel); }
   .nav-drawer a.active { color: var(--text); background: var(--panel-2); }
+  /* the drawer carries the same glyphs as the bar now — it was text-only, the
+     one placement where a destination looked like a different thing */
+  .nav-drawer .nav-label { flex: 1; min-width: 0;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .nav-drawer .nav-count { margin-left: 0; flex-shrink: 0; }
+  .nav-drawer .nav-group-label { padding: var(--sp-5) var(--sp-7) var(--sp-2); }
   .drawer-foot {
     margin-top: 10px; padding-top: 12px; display: flex; flex-direction: column;
     gap: 12px; border-top: 1px solid var(--border);
@@ -1626,6 +1706,12 @@ kbd {
      and a landscape notch ---- */
   .page { padding: 16px max(14px, env(safe-area-inset-right))
                    calc(16px + var(--sab)) max(14px, env(safe-area-inset-left)); }
+  /* the full-height shell's header is a bar, so only its sides tighten — its
+     height is the one thing a phone can least afford to grow */
+  .page-shell > .page-head, .ws-head {
+    padding: var(--sp-4) max(var(--sp-6), env(safe-area-inset-left));
+  }
+  .page-shell > .page-lede { padding: var(--sp-3) var(--sp-6) 0; }
   .review-page, .review-page.page { max-width: 100%; }
 
   /* ---- chat: the conversation list is an overlay, not a permanent block.
@@ -1720,10 +1806,9 @@ kbd {
   .split-layout > main { flex: 1 1 auto; min-height: 0; }
 
   /* ---- network: single column ---- */
-  .net-page { padding: 12px 12px calc(12px + var(--sab)); }
-  .net-body { flex-direction: column; }
+  .net-body { flex-direction: column;
+    padding: 0 var(--sp-6) calc(var(--sp-6) + var(--sab)); }
   .net-side { min-width: 0; max-width: 100%; }
-  .net-head { flex-wrap: wrap; }
 
   /* ---- workspace board: collapse the free-floating panels into a
      scrollable vertical stack. The inline left/top/width/height set by the
@@ -1983,8 +2068,9 @@ body.jarvis-float { margin: 0; height: 100vh; overflow: hidden; }
 .jp-retry:hover { background: var(--panel-2); }
 
 /* :not(.floating) throughout — the detached window is ~404px wide, so it
-   matches this query while being anything but a phone */
-@media (max-width: 640px) {
+   matches this query while being anything but a phone. --bp-phone; was 640,
+   the only other rule at that width. */
+@media (max-width: 768px) {
   .jplayer:not(.floating) { left: 12px; right: 12px; width: auto; }
   /* 16px stops iOS zooming the page when a control takes focus */
   .jplayer:not(.floating) input[type='range'] { font-size: 16px; }

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { api } from '../api.js'
 import { notifyError } from '../notify.js'
 import { useAsk } from '../ask.jsx'
+import Page from '../components/Page.jsx'
 
 // Everything is INCLUDED by default; checkboxes remove. That way an agent
 // can't silently miss something necessary — you only take away what it
@@ -175,9 +176,8 @@ export default function Agents() {
   }
 
   return (
-    <div className="split-layout">
+    <Page variant="split" title="Agents">
       <aside>
-        <div className="side-title">Agents</div>
         <form className="row" onSubmit={create}>
           <input ref={nameRef} className="grow" placeholder="new agent name  (n)" />
           <button type="submit">+</button>
@@ -327,6 +327,6 @@ export default function Agents() {
           </div>
         )}
       </main>
-    </div>
+    </Page>
   )
 }

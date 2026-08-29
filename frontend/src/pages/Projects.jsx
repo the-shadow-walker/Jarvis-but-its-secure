@@ -2,6 +2,8 @@ import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { api } from '../api.js'
 import { useAsk } from '../ask.jsx'
+import Page from '../components/Page.jsx'
+import EmptyState from '../components/EmptyState.jsx'
 
 export default function Projects() {
   const [projects, setProjects] = useState([])
@@ -81,8 +83,7 @@ export default function Projects() {
     refresh()
   }
   return (
-    <div className="page">
-      <h2>Projects</h2>
+    <Page title="Projects">
       <form className="create-project" onSubmit={create}>
         <input placeholder={repoUrl.trim()
                  ? 'project name (repo name if empty)' : 'project name'}
@@ -131,7 +132,7 @@ export default function Projects() {
             <button className="ghost danger" onClick={() => softDelete(p.slug)}>delete</button>
           </li>
         ))}
-        {projects.length === 0 && <li className="dim">no projects yet</li>}
+        {projects.length === 0 && <EmptyState as="li">no projects yet</EmptyState>}
       </ul>
 
       {deleted.length > 0 && (
@@ -152,6 +153,6 @@ export default function Projects() {
           </ul>
         </details>
       )}
-    </div>
+    </Page>
   )
 }

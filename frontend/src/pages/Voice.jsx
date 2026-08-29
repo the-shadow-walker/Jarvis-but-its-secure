@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { TAB_ID } from '../tab.js'
 import { VoiceAudio } from '../voiceAudio.js'
+import PageHeader from '../components/PageHeader.jsx'
 
 // Desktop voice mode: fully hands-free. The page is a status surface — the
 // conversation happens out loud. Mic PCM streams up the WS, TTS PCM streams
@@ -153,20 +154,26 @@ export default function Voice() {
   const orbClass = `voice-orb ${state}${working ? ' working' : ''}`
   const glow = Math.min(1, level * 12)
 
+  // Voice keeps its bespoke stage — a centred column built around the orb,
+  // which no shared shell fits — but it was the one page in the app with no
+  // heading of any kind, so it takes the shared page header. The tier switch is
+  // the header's actions, which is where it already sat.
   return (
     <div className="voice-page">
-      <div className="voice-tier-switch" role="group" aria-label="Model tier">
-        {[['local', 'Local', 'qwen3.5:4b on your GPU — free, fast, escalates when asked'],
-          ['smart', 'Flash', 'deepseek-v4-flash for every turn — costs money, no escalation question'],
-        ].map(([value, label, hint]) => (
-          <button key={value} type="button" title={hint}
-                  className={forceTier === value ? 'on' : ''}
-                  aria-pressed={forceTier === value}
-                  onClick={() => chooseTier(value)}>
-            {label}
-          </button>
-        ))}
-      </div>
+      <PageHeader level={1} title="Voice" actions={(
+        <div className="voice-tier-switch" role="group" aria-label="Model tier">
+          {[['local', 'Local', 'qwen3.5:4b on your GPU — free, fast, escalates when asked'],
+            ['smart', 'Flash', 'deepseek-v4-flash for every turn — costs money, no escalation question'],
+          ].map(([value, label, hint]) => (
+            <button key={value} type="button" title={hint}
+                    className={forceTier === value ? 'on' : ''}
+                    aria-pressed={forceTier === value}
+                    onClick={() => chooseTier(value)}>
+              {label}
+            </button>
+          ))}
+        </div>
+      )} />
 
       <div className="voice-stage">
         <div className={orbClass}

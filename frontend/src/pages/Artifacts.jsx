@@ -3,6 +3,7 @@ import { api } from '../api.js'
 import Md from '../Md.jsx'
 import { notify } from '../notify.js'
 import { useAsk } from '../ask.jsx'
+import Page from '../components/Page.jsx'
 
 // Everything Jarvis made in project-less chats, grouped by chat: view/edit,
 // turn a store into a real project, or merge its files into an existing one.
@@ -65,9 +66,8 @@ export default function Artifacts() {
 
   const isMd = sel && /\.md$/i.test(sel.path)
   return (
-    <div className="split-layout">
+    <Page variant="split" title="Artifacts">
       <aside>
-        <div className="side-title">Artifacts</div>
         <input placeholder="search name or content…" value={q}
                onChange={(e) => { setQ(e.target.value); refresh(e.target.value) }} />
         {artifacts.length === 0 && (
@@ -120,6 +120,6 @@ export default function Artifacts() {
           </>
         )}
       </main>
-    </div>
+    </Page>
   )
 }

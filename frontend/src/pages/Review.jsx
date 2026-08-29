@@ -5,6 +5,7 @@ import SecurityBoard from '../SecurityBoard.jsx'
 import TriagePanel from '../TriagePanel.jsx'
 import { notifyError } from '../notify.js'
 import { useAsk } from '../ask.jsx'
+import Page from '../components/Page.jsx'
 
 // One cross-project queue of everything awaiting the operator: git commit
 // requests, egress host approvals, and security alerts (which now include the
@@ -309,10 +310,9 @@ function AlertRow({ a, onAck, onOpen }) {
 
 export default function Review() {
   return (
-    <div className="page review-page">
-      <h2>Review Center</h2>
+    <Page title="Review Center" className="review-page">
       <TriagePanel />
       <ReviewQueue />
-    </div>
+    </Page>
   )
 }
