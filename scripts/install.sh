@@ -41,7 +41,14 @@ fi
 # ---------------------------------------------------------------- options ----
 DO_CHECK=0 DO_ROOT=0 DO_USER=1 BUILD_FRONTEND=1 BUILD_IMAGE=1
 FROM_HOST="" FORCE=0 ASSUME_YES=0 TARGET_HOST=""
-TARGET_USER="${SUDO_USER:-$(id -un)}"
+# $SUDO_USER is only meaningful when we are actually running under sudo. Taking
+# it unconditionally means a stale value inherited from the environment wins
+# over who we really are — which reported the wrong username inside a sandbox.
+if [ "$(id -u)" -eq 0 ] && [ -n "${SUDO_USER:-}" ]; then
+  TARGET_USER="$SUDO_USER"
+else
+  TARGET_USER="$(id -un)"
+fi
 
 usage() {
   sed -n '2,30p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
@@ -148,6 +155,19 @@ check_cpu_virt() {
     return 0
   fi
 
+  # Device absent does NOT imply module absent. Inside a container, a sandbox,
+  # or any minimal /dev, the module can be loaded on the host while the node is
+  # simply not present in this namespace — and telling someone to modprobe a
+  # module they already have loaded sends them to fix the wrong machine.
+  # Same family of mistake as inferring firmware state from a cpuinfo flag.
+  if kvm_module_loaded; then
+    bad "/dev/kvm absent, but the kvm module IS loaded"
+    fix "this is a namespaced or minimal /dev, not a module problem — bind the"
+    fix "  node in (e.g. --dev-bind /dev/kvm /dev/kvm) rather than modprobing"
+    MISSING_ROOT+=("kvm-device")
+    return 0
+  fi
+
   # No /dev/kvm. Why depends entirely on the architecture, and getting this
   # wrong is worse than not checking: `vmx`/`svm` are x86-only CPUID flags and
   # aarch64 does not advertise virtualization in /proc/cpuinfo at all, so the
@@ -177,33 +197,42 @@ check_cpu_virt() {
   fi
 }
 
+kvm_module_loaded() {
+  grep -qE '^(kvm|kvm_amd|kvm_intel) ' /proc/modules 2>/dev/null
+}
+
 check_kvm() {
-  if [ -e /dev/kvm ]; then
-    if [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
-      ok "/dev/kvm readable and writable"
-    else
-      bad "/dev/kvm exists but $TARGET_USER cannot open it"
-      fix "sudo usermod -aG kvm $TARGET_USER   (then log out and back in)"
-      MISSING_ROOT+=("kvm-group")
-    fi
+  if [ ! -e /dev/kvm ]; then
+    # check_cpu_virt already diagnosed why and printed the right remedy for it;
+    # repeating a second, differently-worded guess here only added noise.
+    return 0
+  fi
+  if [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
+    ok "/dev/kvm readable and writable"
   else
-    bad "/dev/kvm missing (kvm module not loaded)"
-    if grep -qwE 'vmx|svm' /proc/cpuinfo; then
-      fix "sudo modprobe $(grep -qw vmx /proc/cpuinfo && echo kvm_intel || echo kvm_amd)"
-    else
-      fix "enable virtualization in BIOS first — see BLOCKED below"
-    fi
-    MISSING_ROOT+=("kvm-module")
+    bad "/dev/kvm exists but $TARGET_USER cannot open it"
+    fix "sudo usermod -aG kvm $TARGET_USER   (then log out and back in)"
+    fix "  or grant it by udev rule if you would rather not use the group"
+    MISSING_ROOT+=("kvm-group")
   fi
 }
 
+# What actually matters is whether the device OPENS, not how that was arranged.
+# A udev rule granting 0666 makes group membership irrelevant, so demanding the
+# group anyway reports a correctly-configured host as broken — the same mistake
+# as testing a proxy for the thing instead of the thing.
 check_kvm_group() {
-  if id -nG "$TARGET_USER" 2>/dev/null | tr ' ' '\n' | grep -qx kvm; then
+  if [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
+    ok "kvm device is openable (group membership not required)"
+  elif [ -e /dev/kvm ]; then
+    : # unopenable device already reported by check_kvm, with the same fix
+  elif id -nG "$TARGET_USER" 2>/dev/null | tr ' ' '\n' | grep -qx kvm; then
     ok "$TARGET_USER is in the kvm group"
   else
-    bad "$TARGET_USER is NOT in the kvm group"
-    fix "sudo usermod -aG kvm $TARGET_USER   (then log out and back in)"
-    MISSING_ROOT+=("kvm-group")
+    # No device yet, so openability cannot be tested. Flag it as a likely need
+    # rather than a definite failure.
+    warn "$TARGET_USER is not in the kvm group — likely needed once /dev/kvm exists"
+    fix "sudo usermod -aG kvm $TARGET_USER"
   fi
 }
 
