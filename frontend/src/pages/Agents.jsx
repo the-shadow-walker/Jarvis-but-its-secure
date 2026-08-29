@@ -308,15 +308,22 @@ export default function Agents() {
             <ExcludeList title="tools (untick to exclude)" items={toolItems}
                          field="tools_exclude"
                          hint="registry is empty — grants appear here as tools land" />
+            {/* skills compile into the same registry as tools, so this list
+                unions with the one above at run time — two catalogues, one
+                exclusion set (agents_run.agent_exclusions) */}
             <ExcludeList title="skills (untick to exclude)" items={skillItems}
                          field="skills_exclude" hint="no skills yet" />
-            <label className="own-memory">
-              <input type="checkbox" checked={agent.own_memory}
-                     onChange={(e) => patch({ own_memory: e.target.checked })} />
-              <span>own memory — agent keeps its own notes instead of writing to
-                shared memory <span className="dim">(experimental, semantics land
-                with the tool layer)</span></span>
-            </label>
+            <div className="field-row agent-num">
+              <label>max rounds
+                <input type="number" min="0" max="200" value={agent.max_iterations}
+                       placeholder="0"
+                       onChange={(e) => patch({
+                         max_iterations: Math.max(0, parseInt(e.target.value, 10) || 0) })} />
+                <span className="dim small">tool-calling rounds per run. 0 = the
+                  default for how it was started: tight when spawned or
+                  scheduled, the full chat cap when you started it yourself.</span>
+              </label>
+            </div>
           </div>
         )}
       </main>

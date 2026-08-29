@@ -22,6 +22,9 @@ from .vm.turn import run_agent_turn
 from .agent.tools.registry import load_registry, openai_tool_specs
 from .agents_api import _read
 from .auth import require_user
+# one marker for "the operator stopped this", shared with the chat path so a
+# stopped run and a stopped turn read identically in a transcript
+from .chat import INTERRUPTED_MARKER
 from .config import settings
 from .db import get_db, open_conversation
 from .memory import assemble_system_prompt, get_active_project
@@ -72,9 +75,22 @@ def _agent_overrides(agent: dict) -> tuple[str | None, str | None]:
     return (agent.get("model") or None, agent.get("base_url") or None)
 
 
+def agent_exclusions(agent: dict) -> set[str]:
+    """Registry entry names this definition removes.
+
+    Skills compile into the SAME registry as tools (registry.py:_sources), so
+    there is only one namespace to exclude from — `skills_exclude` was declared
+    and stored for a long time while biting nothing. The GUI keeps two lists
+    because they come from two catalogues (/api/tools, /api/skills) and reading
+    "tools" and "skills" separately is genuinely clearer; they just union here.
+    Every path that trims an agent's tools goes through this one function."""
+    return (set(agent.get("tools_exclude") or [])
+            | set(agent.get("skills_exclude") or []))
+
+
 def _agent_tools(agent: dict, autonomy_level: str | None = None) -> list[dict]:
     from . import autonomy, runtime
-    own_exclude = set(agent.get("tools_exclude") or [])
+    own_exclude = agent_exclusions(agent)
     excluded = set(own_exclude)
     # a subagent never launches teams or mints persistent infrastructure —
     # but the spawn tools themselves nest up to MAX_SPAWN_DEPTH (fork-bomb
@@ -122,12 +138,20 @@ async def _validate_project(db, slug: str) -> None:
             raise HTTPException(status_code=404, detail=f"no such project: {slug}")
 
 
-async def _agent_system_prompt(db, agent: dict, active=_USE_DB) -> str:
+async def _agent_system_prompt(db, agent: dict, active=_USE_DB,
+                               extra_exclude: set[str] | None = None) -> str:
     """The agent's prompt, then the shared project context minus excluded
     sections. The agent's context_exclude tokens (soul.md, user.md, env.md,
     all-projects.md, active-project, ...) are assemble_system_prompt's block
-    labels, so exclusion happens at assembly instead of post-hoc splitting."""
-    exclude = set(agent.get("context_exclude") or [])
+    labels, so exclusion happens at assembly instead of post-hoc splitting.
+
+    `extra_exclude` is the CALLER's own trimming, unioned with the agent's:
+    the chat path uses it for the voice local tier's slim sandwich, which is a
+    property of the transport rather than of the agent definition. This is the
+    one place the "agent prompt + trimmed context" shape is built — the chat
+    identity seam (chat.py) calls it too, so an agent thread and a one-shot run
+    assemble their prompt identically."""
+    exclude = set(agent.get("context_exclude") or []) | set(extra_exclude or ())
     base = (await assemble_system_prompt(db, exclude=exclude) if active is _USE_DB
             else await assemble_system_prompt(db, active=active, exclude=exclude))
     return f"{agent['prompt']}\n\n---\n\n{base}"
@@ -181,7 +205,7 @@ def _temp_agent_def(prompt: str, duplicate: bool, label: str = "") -> dict:
     return {
         "name": (label or "").strip()[:40] or "temp agent",
         "prompt": prompt.strip() + "\n\n" + TEMP_REPORT_BACK,
-        "description": "", "model": "", "base_url": "", "own_memory": False,
+        "description": "", "model": "", "base_url": "",
         "context_exclude": [] if duplicate else list(TEMP_LEAN_EXCLUDE),
         "tools_exclude": [], "skills_exclude": [], "max_iterations": 0,
     }
@@ -344,10 +368,16 @@ async def _run_interactive(conversation_id: int, agent: dict, task: str,
         system_prompt = await _agent_system_prompt(db, agent, active=active)
         tools = _agent_tools(agent, await _project_autonomy(db, active))
         mdl, burl = _agent_overrides(agent)
+        # max_iterations was honoured headless and silently ignored here, so the
+        # same definition ran two different caps depending on who started it.
+        # An interactive run is operator-started and watched, so its DEFAULT is
+        # the full chat cap (None) rather than the tight subagent one — the
+        # subagent cap exists to fence unattended nesting, which this isn't.
+        cap = agent.get("max_iterations") or None
         history = [{"role": "user", "content": task}]
         async for event in run_agent_turn(conversation_id, system_prompt, history,
                                           tools=tools, model_name=mdl, base_url=burl,
-                                          active_project=active,
+                                          max_iterations=cap, active_project=active,
                                           on_tool_call=db_tool_sink(db, conversation_id)):
             if event["type"] == "final":
                 final_content = event["content"]
@@ -359,8 +389,23 @@ async def _run_interactive(conversation_id: int, agent: dict, task: str,
         await db.commit()
         bus.publish(chan, {"type": "final", "content": final_content})
     except asyncio.CancelledError:
+        # the operator hit stop. Same contract as chat.py's stop: leave the
+        # interruption in the transcript so a reopened run doesn't look like it
+        # silently produced nothing, publish a final so every attached tail
+        # settles through the normal finish path, then re-raise so the task
+        # ends properly cancelled.
         error = "run cancelled"
-        bus.publish(chan, {"type": "error", "message": error})
+        final_content = INTERRUPTED_MARKER
+        if db is not None:
+            try:
+                await db.execute(
+                    "INSERT INTO messages (conversation_id, role, content) "
+                    "VALUES (?, 'assistant', ?)",
+                    (conversation_id, INTERRUPTED_MARKER))
+                await db.commit()
+            except Exception:  # noqa: BLE001 — the marker is best-effort
+                pass
+        bus.publish(chan, {"type": "final", "content": INTERRUPTED_MARKER})
         raise
     except Exception as e:  # noqa: BLE001 — surface to the GUI, don't 500 mid-stream
         error = str(e)
@@ -419,6 +464,20 @@ async def resume_run_stream(conversation_id: int):
 
         return StreamingResponse(idle(), media_type="text/event-stream")
     return _tail(conversation_id, q)
+
+
+@router.post("/runs/{conversation_id}/stop")
+async def stop_run(conversation_id: int):
+    """Cancel an in-flight agent run — chat has had this since runs detached
+    from their HTTP connection and agents never did, so a wedged agent could
+    only be stopped by restarting the service. The run's CancelledError handler
+    records the interruption, publishes a final event and fires the completion
+    notice, so every attached tail (and the transcript) settles on its own."""
+    task = _active_runs.get(conversation_id)
+    if task is None or task.done():
+        return {"stopped": False}
+    task.cancel()
+    return {"stopped": True}
 
 
 @router.get("/notices/stream")

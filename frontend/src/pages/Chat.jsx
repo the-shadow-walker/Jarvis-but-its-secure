@@ -602,7 +602,14 @@ export default function Chat() {
               <div className="convo-main">
                 <span className="convo-title ellipsis" title={c.summary || `#${c.id}`}>
                   {c.summary || `#${c.id} · ${c.started_at?.slice(5, 16) || ''}`}</span>
-                {c.project_slug && <span className="convo-proj ellipsis">{c.project_slug}</span>}
+                {/* an agent-flavoured thread is still a chat and still belongs
+                    in this list — it just isn't Jarvis speaking, so say so */}
+                {(c.agent_slug || c.project_slug) && (
+                  <span className="convo-proj ellipsis">
+                    {c.agent_slug && <span className="convo-agent">{c.agent_slug}</span>}
+                    {c.project_slug}
+                  </span>
+                )}
               </div>
               <button className="win-btn" title="rename chat"
                       onClick={(e) => {
