@@ -15,21 +15,25 @@ Branch `agent-workbench`, 28 commits ahead of `main`, a clean fast-forward
 | Navigation | `wb/navigation` | one nav source, grouped IA, 404, page shell, lazy routes (**bundle 727kB→298kB**) |
 | Consolidation | `wb/consolidation` | Workspace 1643→341, ComputerUse 807→267, App 577→229; one panel registry; unified chat hook; also fixed a LIVE OrganizerPanel crash |
 
-## NOT merged — deliberately quarantined
+## Merged and verified: `wb/comms-fixes`
 
-`wb/comms-fixes` — fixes for three defects the verification agent found in the
-comms work. **Do not merge until verified.** State: WIP commit preserving
-interrupted work + an active session finishing it. The three defects:
+Fixes for the three defects the verification agent found in the comms work, all
+independently re-verified before merge (op_id fix falsified both ways; migration
+tested against a copy of the live 376-conversation DB):
 
-1. **SECURITY: op_id substitution.** `gateway_server.py` checks only that an
-   op_id exists, never that the connection owns it. A compromised guest can
-   borrow another live turn's identity — and with it that turn's project pin,
-   web_session, artifact_slug and Budget. Predates this work (broker design);
-   the comms feature made it reachable.
-2. **Slug addressing never reaches an agent run** — `agents_run` opens
-   conversations without `agent=`, so spawned/scheduled/interactive runs are
-   unaddressable and the sender is told the opposite of the truth.
-3. **Incognito turns can send a message the wipe then destroys.**
+1. **SECURITY: op_id substitution — FIXED.** A guest could borrow another live
+   turn's identity (and its project pin, web_session, artifact_slug, Budget) via
+   a guessable op_id the gateway only checked for existence. Now bound to the
+   turn with a per-turn capability token (`op_token`, 192-bit, `compare_digest`,
+   fails closed). Honest limit: stops op_id *guessing*, not a guest that can
+   already read another turn's task-local state.
+2. **Slug addressing — FIXED.** `agents_run` now passes `agent=`, so
+   spawned/scheduled/interactive runs are addressable; temp agents stay NULL.
+3. **Incognito send — FIXED.** Refused (send dropped from the ephemeral tool
+   set); by-id refusal closed at the source of truth via a new
+   `conversations.ephemeral` column that outlives the envelope and dies with the
+   row. Two sibling bugs also fixed (by-id accept-destroy, delete destroying
+   sent messages).
 
 CONFIRMED-good by verification: fork-bomb fix (falsified both ways),
 taint-on-receive, VM busy-guards, own_memory removal, migration safety against
