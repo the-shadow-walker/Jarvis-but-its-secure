@@ -128,7 +128,16 @@ def _bring_up_egress_nic() -> None:
     client), so enp0s1 comes up with no address and the guest can't reach the host
     proxy/DNS at 10.201.0.1. Assign the static 10.201.0.2/24 the host already pins
     (dnsmasq dhcp-host in vm/net/dnsmasq-egress.conf) so the proxy path works. A
-    netless guest has only lo -> no-op. Idempotent, best-effort, runs as root."""
+    netless guest has only lo -> no-op. Idempotent, best-effort, runs as root.
+
+    These addresses are the guest half of a THREE-place agreement — here,
+    vm/net/dnsmasq-egress.conf's dhcp-host lease, and vm/net/jarvis-egress.nft's
+    jvtap0 rules. They stay literals on purpose: a second guest under monitored
+    egress is refused host-side (lifecycle.GuestVM._check_egress_ceiling) exactly
+    because making them per-guest means changing all three together, plus giving
+    the guest a way to learn which one it is. Whoever lifts that refusal starts
+    here, and the guest's own CID (ioctl IOCTL_VM_SOCKETS_GET_LOCAL_CID on
+    /dev/vsock) is the identity to derive from — nothing else in here knows."""
     import os
     import subprocess
     guest_ip, host_ip = "10.201.0.2", "10.201.0.1"

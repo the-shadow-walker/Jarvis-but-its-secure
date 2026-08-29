@@ -197,7 +197,22 @@ class Settings(BaseSettings):
     vm_image_version: str = "v1"
     vm_vsock_port: int = 5555            # host gateway; guest dials CID 2 : this
     vm_shell_port: int = 5557            # guest co-working PTY; host dials CID : this
-    vm_guest_cid: int = 3                # guest CID (>=3); host is always CID 2
+    vm_guest_cid: int = 3                # guest 0's CID (>=3); host is always CID 2
+    # How many sandbox guests this host runs. Guest N takes CID vm_guest_cid+N
+    # and its own overlay / EFI vars / console file, so per-agent sandboxes are a
+    # config change rather than a code change.
+    #
+    # ONE on this Pi, and that is not timidity: 3.7 GiB total, 2.4 GiB available,
+    # vm_memory_mb 768 each — two is the honest ceiling and three swaps. Raise it
+    # on a host that can afford it. This is NOT a warm pool (see the idle-scrub
+    # note above, which still stands): guests boot on demand and are scrubbed
+    # when idle; this only decides how many may exist at once.
+    #
+    # Monitored egress (vm_egress) refuses more than one: the nftables ruleset
+    # and dnsmasq lease are written against the single tap jvtap0, so a second
+    # guest would share guest 0's tap and its traffic would be attributed to the
+    # wrong project. Fixing that is a real design job, not a config knob.
+    vm_guests: int = 1
     # Operator co-working shell INTO the guest (browser terminal panel + the
     # `guest-shell` CLI). Both go through the host broker, which pins the guest
     # (no idle-scrub mid-session) and is the only path in — the guest stays
@@ -348,6 +363,10 @@ class Settings(BaseSettings):
     # guest still holds no key — secrets are injected at the proxy, on the wire.
     vm_egress: bool = False
     vm_egress_tap: str = "jvtap0"
+    # Guest 0's MAC, exactly the literal that was hardcoded in vm/run_vm.sh and
+    # is pinned by vm/net/dnsmasq-egress.conf's dhcp-host — do not change it
+    # without changing that lease. Guest N adds N to the last octet.
+    vm_guest_mac: str = "52:54:00:12:34:60"
     vm_egress_host_ip: str = "10.201.0.1"     # host side of the point-to-point
     vm_egress_proxy_port: int = 8443          # host TLS-terminating forward proxy
     vm_egress_pcap: bool = True               # tcpdump ring buffer on the tap

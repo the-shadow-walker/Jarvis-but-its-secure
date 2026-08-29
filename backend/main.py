@@ -21,7 +21,7 @@ from .db import get_db, init_db, set_state
 from .memory import ensure_memory_seeds
 from .vm.egress_proxy import proxy as egress_proxy
 from .vm.gateway_server import gateway
-from .vm.lifecycle import reaper_loop, vm
+from .vm.lifecycle import reaper_loop, teardown_all, vm
 
 
 @asynccontextmanager
@@ -49,7 +49,7 @@ async def lifespan(app: FastAPI):
         await gateway.stop()
         await egress_proxy.stop()
         await guest_shell.stop_unix_server()
-        await vm.teardown()        # never leave a guest running past shutdown
+        await teardown_all()       # never leave a guest running past shutdown
         if settings.vm_egress:
             await vm.net_down()
 
