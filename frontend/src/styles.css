@@ -97,8 +97,9 @@
   --radius-round: 50%;
 
   /* Type. The .5px sizes (12.5/13.5/11.5/10.5/15.5/14.5 — 47 uses) are the
-     survey's "oddities"; each folds into the whole-pixel step below it. The
-     base font is 15px/1.55, set on body. */
+     survey's "oddities"; each folds into the NEAREST whole-pixel step, so most
+     round down but 10.5 rounds up to 11. The bracket beside each step is the
+     literals it absorbs. The base font is 15px/1.55, set on body. */
   --fs-xs: 11px;    /* captions, tags, .convo-proj  (11, 11.5, 10.5, 10) */
   --fs-sm: 12px;    /* .small, meta, uppercase heads (12, 12.5) */
   --fs-md: 13px;    /* dense body, list rows          (13, 13.5) */
