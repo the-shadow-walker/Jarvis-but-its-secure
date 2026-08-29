@@ -34,9 +34,14 @@ function write(list) {
 
 // `/projects/foo` -> 'foo'. `/projects` and `/projects/foo/bar` -> null: only
 // the workspace route itself counts as having opened a project.
+//
+// decodeURIComponent throws on a malformed escape (`/projects/%`), and this
+// runs on every route change — an unparseable URL must mean "no recent", not a
+// nav that throws on the way past.
 export function slugFromPath(pathname) {
   const m = /^\/projects\/([^/]+)\/?$/.exec(pathname || '')
-  return m ? decodeURIComponent(m[1]) : null
+  if (!m) return null
+  try { return decodeURIComponent(m[1]) } catch { return null }
 }
 
 export function remember(slug) {
