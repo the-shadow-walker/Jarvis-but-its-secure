@@ -97,9 +97,21 @@ die()  { printf '\n%serror:%s %s\n' "$RED" "$OFF" "$*" >&2; exit 1; }
 
 # ------------------------------------------------------------------ detect ---
 ARCH="$(uname -m)"
+# Package names differ per arch as well as per distro. On Arch specifically,
+# `qemu-base` is a headless metapackage that already depends on qemu-system-x86,
+# qemu-img and edk2-ovmf — so it is the right minimal choice on x86_64, and the
+# wrong one on aarch64, where it would pull the x86 emulator and no ARM firmware.
+# (`qemu-desktop` and `qemu-full` also work but drag ~40 GUI/audio packages onto
+# what is a headless server.)
 case "$ARCH" in
-  aarch64|arm64) ARCH=aarch64; QEMU_ARCH_PKG_APT=qemu-system-arm; FW_PKG_APT=qemu-efi-aarch64; FW_PKG_PAC=edk2-aarch64 ;;
-  x86_64|amd64)  ARCH=x86_64;  QEMU_ARCH_PKG_APT=qemu-system-x86; FW_PKG_APT=ovmf;             FW_PKG_PAC=edk2-ovmf ;;
+  aarch64|arm64)
+    ARCH=aarch64
+    QEMU_ARCH_PKG_APT=qemu-system-arm; FW_PKG_APT=qemu-efi-aarch64
+    QEMU_PKG_PAC=qemu-system-aarch64;  FW_PKG_PAC=edk2-aarch64 ;;
+  x86_64|amd64)
+    ARCH=x86_64
+    QEMU_ARCH_PKG_APT=qemu-system-x86; FW_PKG_APT=ovmf
+    QEMU_PKG_PAC=qemu-base;            FW_PKG_PAC=edk2-ovmf ;;
   *) die "unsupported architecture $ARCH (need aarch64 or x86_64 — the guest runs under KVM, not emulation)" ;;
 esac
 
@@ -114,7 +126,7 @@ DISTRO="$( . /etc/os-release 2>/dev/null && echo "${PRETTY_NAME:-unknown}" )"
 case "$PKG" in
   apt)    PACKAGES=(python3-venv python3-pip nodejs npm git curl rsync
                     "$QEMU_ARCH_PKG_APT" qemu-utils "$FW_PKG_APT" cloud-image-utils) ;;
-  pacman) PACKAGES=(python nodejs npm git curl rsync qemu-base qemu-img
+  pacman) PACKAGES=(python nodejs npm git curl rsync "$QEMU_PKG_PAC" qemu-img
                     "$FW_PKG_PAC" libisoburn) ;;
   dnf)    PACKAGES=(python3 python3-pip nodejs npm git curl rsync
                     qemu-kvm qemu-img edk2-ovmf xorriso) ;;
