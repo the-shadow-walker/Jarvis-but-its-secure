@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from '../api.js'
 import { notify, notifyError } from '../notify.js'
+import { useAsk } from '../ask.jsx'
 
 // Drag files between directories; a directory's "mark" is the sentence Jarvis
 // reads to know what belongs in it.
@@ -10,6 +11,7 @@ export default function OrganizerPanel({ slug }) {
   const [over, setOver] = useState(null)
   const uploadRef = useRef(null)
   const uploadDest = useRef('')
+  const ask = useAsk()
 
   const refresh = useCallback(async () => {
     const [d, f] = await Promise.all([
