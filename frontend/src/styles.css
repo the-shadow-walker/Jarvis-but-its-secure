@@ -314,6 +314,21 @@ nav a.active, .rail-links > a.active { color: var(--text); background: var(--pan
   transform-origin: bottom left;
   animation: rise-in 0.16s cubic-bezier(0.21, 1.02, 0.55, 1) both; }
 
+/* ---- grouped destinations ----
+   The overflow menu and the phone drawer render the same grouped list (nav.jsx
+   NavGroupList), so the heading style is written once and both wear it. Before
+   this the menu was eight unlabelled rows in no order, which is where Network,
+   Context and Logs were effectively hidden.
+   A div, not an <h*>: it labels a menu, and the group carries the accessible
+   name — putting real headings in a popover would wreck the page outline. */
+.nav-group { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.nav-group + .nav-group { margin-top: var(--sp-5); }
+.nav-group-label {
+  font-size: var(--fs-xs); text-transform: uppercase; letter-spacing: 0.08em;
+  color: var(--dim); font-weight: 600; padding: var(--sp-3) var(--sp-5) var(--sp-1);
+  user-select: none;
+}
+
 /* overflow menu ("More") */
 .more-wrap { margin-left: 2px; }
 .nav-more {
@@ -326,8 +341,12 @@ nav a.active, .rail-links > a.active { color: var(--text); background: var(--pan
 }
 .nav-more .chev { transform: rotate(90deg); font-size: 12px; }
 .nav-more .chev.open { transform: rotate(-90deg); }
-.more-drop { width: 210px; }
+/* `.more-drop { width: 210px }` used to sit here and had never applied: it is
+   declared before `.notif-drop`'s own 340px and loses on order, so the menu has
+   always been 340 wide. Removed rather than moved — 340 is the width every
+   other popover in the bar uses, and the grouped rows want it. */
 .more-item { text-decoration: none; }
+.more-item .nav-label { flex: 1; min-width: 0; }
 .more-item.active { color: var(--accent); }
 .more-drop .more-logout {
   background: none; color: var(--dim); width: 100%; text-align: left;
@@ -471,6 +490,14 @@ input:focus, textarea:focus { border-color: var(--accent);
 .grow { flex: 1; }
 .center { display: flex; align-items: center; justify-content: center; height: 80vh; }
 .center-pad { padding: 40px; text-align: center; }
+.center-link { text-align: center; margin: 0; }
+.center-link a { color: var(--accent); }
+/* A lazily-loaded route's chunk, in flight. It paints nothing on purpose: the
+   chunks are prefetched on idle, so this is on screen for a few tens of
+   milliseconds if ever, and a spinner that appears and vanishes that fast reads
+   as a flicker rather than as progress. It still claims the space so the page
+   below does not jump when the chunk lands. */
+.route-pending { flex: 1; min-height: 0; }
 .dim { color: var(--dim); }
 .warn { color: var(--amber); font-size: 12.5px; }
 .error { color: var(--red); font-size: 13px; }
@@ -1627,11 +1654,17 @@ kbd {
   .nav-drawer a {
     color: var(--dim); text-decoration: none;
     padding: 13px 14px; font-size: 15px; border-radius: 10px;
-    min-height: var(--tap); display: flex; align-items: center;
+    min-height: var(--tap); display: flex; align-items: center; gap: var(--sp-6);
     transition: color 0.15s, background 0.15s;
   }
   .nav-drawer a:hover { color: var(--text); background: var(--panel); }
   .nav-drawer a.active { color: var(--text); background: var(--panel-2); }
+  /* the drawer carries the same glyphs as the bar now — it was text-only, the
+     one placement where a destination looked like a different thing */
+  .nav-drawer .nav-label { flex: 1; min-width: 0;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .nav-drawer .nav-count { margin-left: 0; flex-shrink: 0; }
+  .nav-drawer .nav-group-label { padding: var(--sp-5) var(--sp-7) var(--sp-2); }
   .drawer-foot {
     margin-top: 10px; padding-top: 12px; display: flex; flex-direction: column;
     gap: 12px; border-top: 1px solid var(--border);
