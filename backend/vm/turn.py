@@ -39,7 +39,12 @@ async def run_agent_turn(conversation_id, system_prompt, history, *, tools=None,
         op_id=op_id, conversation_id=conversation_id, active_project=active_project,
         artifact_slug=runtime.artifact_slug.get(),
         web_session=runtime.web_session.get(),
-        ephemeral=runtime.ephemeral.get(), event_chan=runtime.event_chan.get())
+        ephemeral=runtime.ephemeral.get(), event_chan=runtime.event_chan.get(),
+        # the fork-bomb fence: this turn's guest brokers its tool calls onto the
+        # gateway's task, so the depth only reaches _agent_tools if it rides the
+        # envelope. A child run started from a brokered spawn_agent builds ITS
+        # envelope here too, one hop deeper — that is what makes the count grow.
+        spawn_depth=runtime.spawn_depth.get())
 
     pending: dict = {}
     async for ev in guest_turn(

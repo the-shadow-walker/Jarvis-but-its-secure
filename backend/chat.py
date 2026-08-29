@@ -444,7 +444,11 @@ async def _run_chat_turn(conversation_id: int, ephemeral: bool,
             op_id=op_id, conversation_id=conversation_id, active_project=active,
             artifact_slug=(f"chat-{conversation_id}" if atoken is not None else None),
             web_session=runtime.web_session.get(), ephemeral=ephemeral,
-            event_chan=chan)
+            event_chan=chan,
+            # a chat turn is the head of its tree, so this is 0 today; stated
+            # rather than defaulted because a spawn fence that silently reads
+            # its default is exactly the bug this field exists to close
+            spawn_depth=runtime.spawn_depth.get())
         source = guest_turn(conversation_id, system_prompt, history,
                             rules=standing_rules_tail(), tool_specs=tools,
                             read_only=list(read_only_names(entries)),
