@@ -36,14 +36,16 @@ async def test_agent_crud(client):
     a = r.json()
     # exclusion model: nothing excluded by default
     assert a["context_exclude"] == [] and a["tools_exclude"] == []
-    assert a["model"] == "" and a["own_memory"] is False
+    assert a["model"] == "" and a["max_iterations"] == 0
+    # own_memory is gone: it was stored and checkboxed but read by nothing
+    assert "own_memory" not in a
     assert "Research Helper" in a["prompt"]
 
     a.update({
         "model": "qwen2.5:14b",
         "base_url": "http://localhost:11434/v1",
         "context_exclude": ["user.md"],
-        "own_memory": True,
+        "max_iterations": 7,
         "prompt": "You research things and report back.",
     })
     r = await client.put("/api/agents/research-helper", json=a)
@@ -53,7 +55,7 @@ async def test_agent_crud(client):
     b = r.json()
     assert b["model"] == "qwen2.5:14b"
     assert b["context_exclude"] == ["user.md"]
-    assert b["own_memory"] is True
+    assert b["max_iterations"] == 7
     assert b["prompt"] == "You research things and report back."
 
     r = await client.get("/api/agents")

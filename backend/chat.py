@@ -38,6 +38,12 @@ class ChatRequest(BaseModel):
     # same tri-state as AssignProject.mode. Omitted it keeps the old shape: a
     # slug pins, no slug follows the globally-loaded project.
     project_mode: Literal["follow", "none", "pin"] | None = None
+    # run this NEW conversation as an agent (agents/<slug>/AGENT.md) instead of
+    # as central Jarvis. Like `project`, it binds at creation and is ignored for
+    # an existing conversation: a thread's identity is what its transcript is
+    # attributable to, so it must not shift under the operator mid-conversation.
+    # Changing agent in the GUI therefore starts a new thread.
+    agent: str | None = None
     # which browser tab is asking. The SPA sends the id it registered on
     # /api/gui/stream, so anything this turn plays comes out of the machine the
     # operator is sitting at instead of every open tab at once.
@@ -303,6 +309,22 @@ async def _auto_journal(db, conversation_id: int, user_msg: str, final: str,
         await registry.dispatch("journal_update", {"entry": f"(auto) {line[:200]}"})
 
 
+def _agent_def(slug: str | None) -> dict | None:
+    """The AGENT.md behind a conversation's identity, or None for Jarvis.
+
+    A missing or unparseable definition is an ERROR, not a silent fallback:
+    running a thread the operator opened as `scout` under Jarvis's own prompt
+    would be the wrong agent answering under the right name. The exception
+    surfaces on the turn's bus channel like any other turn failure."""
+    if not slug:
+        return None
+    from .agents_api import _read as read_agent_def
+    try:
+        return read_agent_def(slug)
+    except HTTPException as exc:
+        raise RuntimeError(f"agent '{slug}': {exc.detail}") from None
+
+
 async def _run_chat_turn(conversation_id: int, ephemeral: bool,
                          user_msg: str = "", tab: str | None = None,
                          voice: bool = False, model_name: str | None = None,
@@ -350,7 +372,8 @@ async def _run_chat_turn(conversation_id: int, ephemeral: bool,
         # indistinguishable from "not chosen yet" and inherited the last
         # project loaded.
         async with db.execute(
-            "SELECT c.project_locked AS locked, p.slug AS slug FROM conversations c "
+            "SELECT c.project_locked AS locked, c.agent_slug AS agent_slug, "
+            "p.slug AS slug FROM conversations c "
             "LEFT JOIN projects p ON p.id = c.project_id AND p.deleted_at IS NULL "
             "WHERE c.id = ?", (conversation_id,)) as cur:
             row = await cur.fetchone()
@@ -363,10 +386,27 @@ async def _run_chat_turn(conversation_id: int, ephemeral: bool,
         # tools deep in the loop (and spawn_agent children) resolve this pin
         # instead of the DB global — see toolctx.active_slug
         ptoken = runtime.active_project.set(active)
+        # IDENTITY. A conversation bound to an agent slug runs AS that agent:
+        # its AGENT.md prompt leads the sandwich and its exclusions bite.
+        # Nothing else about the turn changes — multi-turn history, tier-2
+        # compaction, the project pin, detach/re-attach and stop are all the
+        # chat machinery, unmodified. That is the point: a general agent is a
+        # chat with a name, not a second runtime.
+        agent_def = _agent_def(row["agent_slug"] if row else None)
         # context_exclude: the voice local tier runs an 8B with a small ctx
         # window — it gets a slim sandwich (operator rules are never droppable)
-        system_prompt = await assemble_system_prompt(
-            db, active=active, exclude=set(context_exclude) or None)
+        if agent_def is not None:
+            from .agents_run import _agent_overrides, _agent_system_prompt
+            system_prompt = await _agent_system_prompt(
+                db, agent_def, active=active,
+                extra_exclude=set(context_exclude) or None)
+            # the definition's model override, unless the caller already routed
+            # this turn (voice picks its tier per utterance and must win)
+            if not voice and model_name is None and base_url is None:
+                model_name, base_url = _agent_overrides(agent_def)
+        else:
+            system_prompt = await assemble_system_prompt(
+                db, active=active, exclude=set(context_exclude) or None)
         if voice:
             # spoken turns: narrate-before-acting + speakable-output rules.
             # Appended after everything (incl. the operator-rules tail) so it
@@ -406,6 +446,16 @@ async def _run_chat_turn(conversation_id: int, ephemeral: bool,
             # the voice local tier: a 4B gets a hand-picked conversational
             # toolset, not thirty schemas — everything else is escalation's job
             entries = [e for e in entries if e["name"] in tools_only]
+        if agent_def is not None:
+            # the definition's exclusions, applied LAST: an agent thread may
+            # narrow the set the project already allows it, never widen it.
+            # NOT agents_run._agent_tools — that also strips the delegation
+            # tools, which is SUBAGENT policy (a spawned worker must not sprout
+            # side-trees). A thread the operator opened is top-level, so it
+            # keeps whatever the project's autonomy dial grants.
+            from .agents_run import agent_exclusions
+            excluded = agent_exclusions(agent_def)
+            entries = [e for e in entries if e["name"] not in excluded]
         # ...and a shortened Notes body. NOT zero: the first line of a body is
         # where the load-bearing operating instruction lives ("Do not call
         # music_search first", "use computer_library rather than guessing at
@@ -458,6 +508,9 @@ async def _run_chat_turn(conversation_id: int, ephemeral: bool,
                             # that text instead of obeying it. Escalated voice
                             # turns (DeepSeek, base_url unset) keep it.
                             inject_rules=not (voice and base_url),
+                            # an agent definition may cap its own rounds; None
+                            # keeps the normal chat cap
+                            max_iterations=(agent_def or {}).get("max_iterations") or None,
                             # voice local tier: run on the operator's ollama.
                             # The guest never dials it — the host gateway makes
                             # the call, so base_url is honoured host-side.
@@ -671,8 +724,15 @@ async def chat(body: ChatRequest):
             # provisional title: first bit of the opening message; an LLM
             # naming pass upgrades it after the first exchange (best effort)
             title = " ".join(body.message.split())[:48] or "(empty)"
+            # identity is validated here, not in the detached turn: a typo'd
+            # slug should be a 404 on the POST the operator can see, not an
+            # error event on a conversation that already exists
+            if body.agent:
+                from .agents_api import _read as read_agent_def
+                read_agent_def(body.agent)      # 404s on an unknown slug
             conversation_id = await open_conversation(
-                db, project=active, title=title, locked=mode != "follow")
+                db, project=active, title=title, locked=mode != "follow",
+                agent=body.agent or None)
             if body.confirm_peak:
                 confirm_peak(conversation_id)
         else:

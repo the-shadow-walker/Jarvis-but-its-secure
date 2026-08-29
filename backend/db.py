@@ -317,7 +317,14 @@ async def init_db() -> None:
                           # 1: project_id is the answer verbatim — including
                           # NULL, which means deliberately no project, so the
                           # turn falls back to the chat's artifact store.
-                          ("project_locked", "INTEGER NOT NULL DEFAULT 0")):
+                          ("project_locked", "INTEGER NOT NULL DEFAULT 0"),
+                          # which agent this conversation runs AS. NULL is
+                          # central Jarvis (every chat before this column).
+                          # A slug makes the thread that agent's: its AGENT.md
+                          # prompt leads the sandwich and its exclusions bite,
+                          # while the conversation stays an ordinary multi-turn
+                          # chat — see chat.py:_run_chat_turn.
+                          ("agent_slug", "TEXT")):
             if col not in ccols:
                 await db.execute(f"ALTER TABLE conversations ADD COLUMN {col} {decl}")
         await db.execute(
@@ -364,7 +371,8 @@ async def set_state(db: aiosqlite.Connection, key: str, value: str | None) -> No
 async def open_conversation(db: aiosqlite.Connection, *, project: str | None,
                             title: str, kind: str = "chat",
                             parent: int | None = None, job_id: str | None = None,
-                            locked: bool = False, commit: bool = True) -> int:
+                            locked: bool = False, agent: str | None = None,
+                            commit: bool = True) -> int:
     """Create a conversation node and return its id — the one place that resolves
     a project slug to its id and inserts the row.
 
@@ -375,7 +383,11 @@ async def open_conversation(db: aiosqlite.Connection, *, project: str | None,
     opening user message) are the caller's, using the returned id.
 
     `locked` pins the binding: the turn uses this project (or no project at all,
-    if `project` is None) instead of following whatever is loaded globally."""
+    if `project` is None) instead of following whatever is loaded globally.
+
+    `agent` is the slug this conversation runs AS (None = central Jarvis). It
+    is set once, at creation: an identity that could change mid-thread would
+    leave a transcript nobody can attribute."""
     project_id = None
     if project:
         async with db.execute("SELECT id FROM projects WHERE slug = ?", (project,)) as cur:
@@ -383,8 +395,8 @@ async def open_conversation(db: aiosqlite.Connection, *, project: str | None,
         project_id = row["id"] if row else None
     cur = await db.execute(
         "INSERT INTO conversations (project_id, summary, kind, parent_conversation_id, "
-        "job_id, project_locked) VALUES (?, ?, ?, ?, ?, ?)",
-        (project_id, title, kind, parent, job_id, 1 if locked else 0))
+        "job_id, project_locked, agent_slug) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (project_id, title, kind, parent, job_id, 1 if locked else 0, agent))
     if commit:
         await db.commit()
     return cur.lastrowid

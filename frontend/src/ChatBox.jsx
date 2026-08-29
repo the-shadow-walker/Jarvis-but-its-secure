@@ -5,7 +5,20 @@ import { useAsk } from './ask.jsx'
 
 // Compact chat, embeddable anywhere (board panel). When projectSlug is set,
 // conversations are filtered to that project and new ones are linked to it.
-export default function ChatBox({ projectSlug }) {
+//
+// `agent` is the thread's IDENTITY — '' is central Jarvis, a slug runs the
+// thread as that agent (its AGENT.md prompt, its exclusions). Everything else
+// is unchanged, which is the point: an agent thread is a chat with a name, so
+// it keeps multi-turn history, compaction, detach/re-attach and stop for free.
+// Several panels on one board, each on a different agent, work the same project
+// at the same time — the picker is what makes that expressible.
+export default function ChatBox({ projectSlug, agent = '', onAgentChange }) {
+  // the picker is owned by the panel (so it survives a remount and a reload);
+  // fall back to local state for any caller that doesn't hold it
+  const [localAgent, setLocalAgent] = useState('')
+  const who = onAgentChange ? agent : localAgent
+  const setWho = onAgentChange || setLocalAgent
+  const [agents, setAgents] = useState([])
   const [convos, setConvos] = useState([])
   const [cid, setCid] = useState(null)
   const [messages, setMessages] = useState([])
@@ -46,19 +59,30 @@ export default function ChatBox({ projectSlug }) {
   const refresh = () =>
     api(`/api/conversations${projectSlug ? `?project=${encodeURIComponent(projectSlug)}` : ''}`)
       .then((r) => { setConvos(r.conversations); return r.conversations })
+  // the roster for the picker; failure just leaves it as Jarvis-only
   useEffect(() => {
-    // a board panel remounts on every open: resume where the operator left
-    // off — a running turn always wins, else the project's latest chat —
-    // instead of amnesia into "new chat" while work continues server-side
+    api('/api/agents').then((r) => setAgents(r.agents)).catch(() => {})
+  }, [])
+  useEffect(() => {
+    // a board panel remounts on every open, and switching identity is a
+    // switch of thread: resume where the operator left off for THIS agent —
+    // a running turn wins, else that agent's latest thread — instead of
+    // amnesia into "new chat" while work continues server-side
     refresh().then((list) => {
-      const running = list.find((c) => c.running)
-      const target = running || (projectSlug ? list[0] : null)
-      if (target) open(target.id)
+      const mine = list.filter((c) => (c.agent_slug || '') === who)
+      const running = mine.find((c) => c.running)
+      const target = running || (projectSlug ? mine[0] : null)
+      open(target ? target.id : null)
     }).catch(() => {})
-  }, [projectSlug]) // eslint-disable-line
+  }, [projectSlug, who]) // eslint-disable-line
 
   async function pick(id) {
     setShowHistory(false)
+    // the list is already filtered to `who`, but a thread carries its own
+    // identity — follow it rather than letting the picker lie about the
+    // transcript on screen
+    const row = convos.find((c) => c.id === id)
+    if (row && (row.agent_slug || '') !== who) setWho(row.agent_slug || '')
     await open(id)
   }
 
@@ -133,12 +157,15 @@ export default function ChatBox({ projectSlug }) {
         // a NEW conversation is created pre-pinned to this board's project, so
         // even its first turn runs in the right context (the old post-hoc PATCH
         // raced the turn's project resolution)
+        // identity, like the project pin, binds at creation only — the backend
+        // ignores it on an existing conversation
         { message: text, conversation_id: cid, confirm_peak: confirmPeak,
-          project: wasNew && projectSlug ? projectSlug : undefined },
+          project: wasNew && projectSlug ? projectSlug : undefined,
+          agent: wasNew && who ? who : undefined },
         (ev) => {
           if (ev.type === 'start') {
             setCid(ev.conversation_id)
-            if (wasNew && projectSlug) refresh()
+            if (wasNew) refresh()   // the new thread joins its picker's list
           }
           handleTurnEvent(ev)
         },
@@ -164,19 +191,31 @@ export default function ChatBox({ projectSlug }) {
   }
 
   const current = convos.find((c) => c.id === cid)
+  // one panel = one identity; its history is that identity's threads
+  const threads = convos.filter((c) => (c.agent_slug || '') === who)
+  const whoName = who
+    ? (agents.find((a) => a.slug === who)?.name || who) : 'Jarvis'
   return (
     <div className="chatbox">
       <div className="row cb-head">
-        <button className="ghost" title="past chats"
-                onClick={() => setShowHistory((s) => !s)}>☰ {convos.length}</button>
+        <button className="ghost" title="past threads"
+                onClick={() => setShowHistory((s) => !s)}>☰ {threads.length}</button>
+        <select className="cb-agent" value={who}
+                title="who this thread runs as — switching opens that agent's threads"
+                onChange={(e) => { setShowHistory(false); setWho(e.target.value) }}>
+          <option value="">Jarvis</option>
+          {agents.map((a) => (
+            <option key={a.slug} value={a.slug}>{a.name}</option>
+          ))}
+        </select>
         <span className="grow ellipsis dim">
-          {current ? (current.summary || `#${current.id}`) : 'new chat'}</span>
-        <button className="ghost" title="new chat" onClick={newChat}>+ new</button>
+          {current ? (current.summary || `#${current.id}`) : 'new thread'}</span>
+        <button className="ghost" title="new thread" onClick={newChat}>+ new</button>
       </div>
       {showHistory && (
         <ul className="cb-history">
-          {convos.length === 0 && <li className="dim">no past chats yet</li>}
-          {convos.map((c) => (
+          {threads.length === 0 && <li className="dim">no past threads yet</li>}
+          {threads.map((c) => (
             <li key={c.id} className={c.id === cid ? 'active' : ''}
                 onClick={() => pick(c.id)}>
               <span className="grow ellipsis">
@@ -189,7 +228,7 @@ export default function ChatBox({ projectSlug }) {
       <div className="messages compact">
         {messages.length === 0 && (
           <div className="dim center-pad">
-            {projectSlug ? 'chat with Jarvis about this project' : 'say hi'}
+            {projectSlug ? `chat with ${whoName} about this project` : 'say hi'}
           </div>
         )}
         {messages.map((m, i) => (
@@ -215,7 +254,7 @@ export default function ChatBox({ projectSlug }) {
       )}
       <form className="row" onSubmit={(e) => { e.preventDefault(); send() }}>
         <textarea className="grow" rows={2} value={input}
-                  placeholder="message Jarvis…"
+                  placeholder={`message ${whoName}…`}
                   onChange={(e) => setInput(e.target.value)}
                   onKeyDown={(e) => {
                     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send() }

@@ -466,6 +466,10 @@ input:focus, textarea:focus { border-color: var(--accent);
 .convo-list li.active .convo-title { font-weight: 550; }
 .convo-proj { font-size: 11px; letter-spacing: 0.03em; color: var(--dim);
   opacity: 0.85; }
+/* a thread that runs as an agent rather than as Jarvis. Nested inside the
+   caption row so it shares its type; accent-tinted because whose voice a
+   transcript is in matters more than where it happened. */
+.convo-agent { color: var(--accent); margin-right: 6px; }
 .convo-list li::before {
   content: ''; position: absolute; left: 0; top: 26%; bottom: 26%; width: 3px;
   border-radius: 3px; background: var(--accent);
@@ -1017,9 +1021,10 @@ kbd {
   font-family: ui-monospace, Menlo, monospace;
 }
 .check-grid label.excluded { opacity: 0.45; text-decoration: line-through; }
-.check-grid input, .own-memory input { accent-color: var(--accent); }
-.own-memory { display: flex; gap: 10px; align-items: flex-start;
-  font-size: 13.5px; cursor: pointer; }
+.check-grid input { accent-color: var(--accent); }
+/* the .own-memory rules went with the checkbox: the field was stored, shown,
+   and read by no runtime code. See agents_api.FIELD_DEFAULTS for why it is
+   removed rather than implemented. */
 
 /* ---- todos ---- */
 .todo-list { list-style: none; padding: 0; }
@@ -1092,6 +1097,9 @@ kbd {
 
 /* ---- chatbox history ---- */
 .cb-head { align-items: center; }
+/* identity picker: narrow on purpose — the thread title beside it is the
+   thing being read, and the panel is only ~440px wide */
+.cb-agent { max-width: 116px; padding: 3px 6px; font-size: 12px; }
 .cb-history { list-style: none; padding: 0; margin: 0 0 6px; max-height: 45%;
   overflow-y: auto; border: 1px solid var(--border); border-radius: 7px; }
 .cb-history li { display: flex; align-items: center; gap: 6px; padding: 6px 9px;

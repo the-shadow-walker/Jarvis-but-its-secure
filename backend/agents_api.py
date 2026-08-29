@@ -46,16 +46,26 @@ Report back concisely: lead with the outcome, then only the details that
 change what the reader does next.
 """
 
+# NOTE: `own_memory` used to live here. It was stored, checkboxed in the GUI,
+# and read by NO runtime code — a switch that did nothing. It is gone rather
+# than implemented: memory notes are plain files the operator reads and edits
+# in the GUI, and a private per-agent silo would be knowledge the operator
+# cannot see. The honest version of "don't lean on shared memory" already
+# exists and bites: context_exclude: standing-memory. A stale `own_memory:`
+# key in an old AGENT.md is ignored on read and dropped on the next save.
 FIELD_DEFAULTS = {
     "description": "",
     "model": "",          # "" = inherit the main model (deepseek-v4-flash)
     "base_url": "",       # "" = default DeepSeek endpoint; e.g. ollama: http://localhost:11434/v1
-    "own_memory": False,  # experimental: agent keeps its own notes instead of sharing
     "context_exclude": [],
     "tools_exclude": [],
+    # skills compile into the SAME registry as tools, so this unions with
+    # tools_exclude at run time (agents_run.agent_exclusions) — two lists, one
+    # namespace. Kept separate because the GUI reads two catalogues.
     "skills_exclude": [],
-    # headless runs (spawn_agent, schedules) get the tight subagent iteration
-    # cap by default; set this to grant a specific agent more rounds. 0 = default.
+    # rounds of the ReAct loop this agent may take. 0 = the path's default: the
+    # tight subagent cap for headless runs (spawn_agent, schedules), the full
+    # chat cap for a run or thread the operator started and is watching.
     "max_iterations": 0,
 }
 
@@ -168,7 +178,6 @@ class SaveAgent(BaseModel):
     description: str = ""
     model: str = ""
     base_url: str = ""
-    own_memory: bool = False
     context_exclude: list[str] = []
     tools_exclude: list[str] = []
     skills_exclude: list[str] = []
@@ -199,7 +208,10 @@ def _read(slug: str) -> dict:
     path = _agent_path(slug)
     if not path.is_file():
         raise HTTPException(status_code=404, detail="no such agent")
-    meta = _parse_md(path)
+    # relaxed requirements: an AGENT.md with no `description:` is odd but
+    # usable, and 500ing on it made an agent the roster happily lists
+    # un-openable — and now un-runnable as a chat identity too
+    meta = _parse_md(path, required=())
     if meta is None:
         raise HTTPException(status_code=500, detail="unparseable AGENT.md")
     out = {"slug": slug, "name": meta.get("name", slug), "prompt": meta.get("body", "")}
@@ -214,7 +226,7 @@ def _list_dir(base):
         for md in sorted(base.glob("*/AGENT.md")):
             if md.parent.name.startswith("."):
                 continue  # skip the .trash bin
-            meta = _parse_md(md) or {}
+            meta = _parse_md(md, required=()) or {}
             agents.append({
                 "slug": md.parent.name,
                 "name": meta.get("name", md.parent.name),

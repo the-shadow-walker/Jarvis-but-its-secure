@@ -153,7 +153,9 @@ async def run_node(*, job_id: str, cid: int, kind: str, brief: str, project: str
         else:
             # DIRECT / subagent — do the work through the shared loop.
             # Build the node via the Agent seam: narrowed context + this layer's
-            # brief. spawn() is what a parent used to mint this child's context.
+            # brief. Agent is now a 3-field dataclass whose only method is
+            # system_prompt() — the old Agent.spawn() is gone; a parent mints a
+            # child's context by calling _node_context and constructing one here.
             bus.publish(job_id, {"type": "node_status", "node_id": cid, "status": "running"})
             context = await _node_context(kind, project, parent_summary)
             node = Agent(context=context, tools=leaf_tools or [], brief=brief)
