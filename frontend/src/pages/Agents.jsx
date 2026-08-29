@@ -313,7 +313,7 @@ export default function Agents() {
                 exclusion set (agents_run.agent_exclusions) */}
             <ExcludeList title="skills (untick to exclude)" items={skillItems}
                          field="skills_exclude" hint="no skills yet" />
-            <div className="field-row">
+            <div className="field-row agent-num">
               <label>max rounds
                 <input type="number" min="0" max="200" value={agent.max_iterations}
                        placeholder="0"

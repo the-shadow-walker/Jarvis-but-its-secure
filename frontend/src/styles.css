@@ -1022,6 +1022,8 @@ kbd {
 }
 .check-grid label.excluded { opacity: 0.45; text-decoration: line-through; }
 .check-grid input { accent-color: var(--accent); }
+/* a lone numeric field in a field-row would otherwise stretch the full pane */
+.agent-num input { max-width: 120px; }
 /* the .own-memory rules went with the checkbox: the field was stored, shown,
    and read by no runtime code. See agents_api.FIELD_DEFAULTS for why it is
    removed rather than implemented. */
