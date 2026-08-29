@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { api } from '../api.js'
 import Md from '../Md.jsx'
+import Page from '../components/Page.jsx'
 
 // Logs: full transcript viewer for any conversation — every user/assistant
 // message and every tool call with its args and result — plus the numbers that
@@ -257,10 +258,9 @@ export default function Logs() {
   const totalCost = calls.reduce((s, c) => s + (c.cost_usd || 0), 0)
 
   return (
-    <div className="split-layout">
+    <Page variant="split" title="Logs">
       <aside>
-        <div className="side-title">Logs</div>
-        <div className="row" style={{ gap: 6, marginBottom: 8 }}>
+        <div className="toolbar log-views">
           <button className={view === 'logs' ? '' : 'ghost'}
                   onClick={() => setView('logs')}>transcripts</button>
           <button className={view === 'cost' ? '' : 'ghost'}
@@ -392,6 +392,6 @@ export default function Logs() {
           </div>
         )}
       </main>
-    </div>
+    </Page>
   )
 }

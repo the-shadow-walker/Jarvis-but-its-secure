@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { api } from '../api.js'
 import { notifyError } from '../notify.js'
 import { useAsk } from '../ask.jsx'
+import Page from '../components/Page.jsx'
 
 const ASSEMBLED = '::assembled'
 
@@ -117,7 +118,7 @@ export default function Context() {
   }
 
   return (
-    <div className="split-layout">
+    <Page variant="split" title="Context">
       <aside>
         <div className="side-title">Jarvis's memory</div>
         <ul className="file-list">
@@ -199,6 +200,6 @@ export default function Context() {
           </>
         )}
       </main>
-    </div>
+    </Page>
   )
 }

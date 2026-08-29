@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { api, subscribeSse } from '../api.js'
 import { notifyError } from '../notify.js'
 import { useAsk } from '../ask.jsx'
+import Page from '../components/Page.jsx'
 
 // The guest's live egress: a scrolling feed of every outbound request the
 // sandbox made, with a verdict chip (allow / deny / cut), an approval queue for
@@ -269,20 +270,19 @@ export default function Network() {
   const shown = filter ? feed.filter((e) => e.project === filter) : feed
 
   return (
-    <div className="net-page">
-      <div className="net-head">
-        <h2>Network</h2>
-        <span className="run-dot running" title="live egress stream" />
-        <span className="dim small">live egress</span>
-        <span className="grow" />
-        <label className="dim small">project&nbsp;
-          <select value={filter} onChange={(e) => setFilter(e.target.value)}>
-            <option value="">all projects</option>
-            {projects.map((p) => <option key={p.slug} value={p.slug}>{p.name}</option>)}
-          </select>
-        </label>
-      </div>
-
+    <Page variant="fill" className="net-page" title="Network"
+          actions={(
+            <div className="page-head-actions">
+              <span className="run-dot running" title="live egress stream" />
+              <span className="dim small">live egress</span>
+              <label className="dim small">project&nbsp;
+                <select value={filter} onChange={(e) => setFilter(e.target.value)}>
+                  <option value="">all projects</option>
+                  {projects.map((p) => <option key={p.slug} value={p.slug}>{p.name}</option>)}
+                </select>
+              </label>
+            </div>
+          )}>
       <div className="net-body">
         <div className="net-feed">
           <div className="dim small">{shown.length} event{shown.length !== 1 && 's'}
@@ -329,6 +329,6 @@ export default function Network() {
           )}
         </div>
       </div>
-    </div>
+    </Page>
   )
 }

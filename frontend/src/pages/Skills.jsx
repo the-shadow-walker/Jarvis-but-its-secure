@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { api } from '../api.js'
+import Page from '../components/Page.jsx'
 
 // Skill authoring as a fill-out form: the fields generate valid frontmatter
 // server-side, so nobody hand-writes YAML. "Edit raw" stays as the escape
@@ -63,9 +64,8 @@ export default function Skills() {
   }
 
   return (
-    <div className="split-layout">
+    <Page variant="split" title="Skills">
       <aside>
-        <div className="side-title">Skills</div>
         <form className="stack" onSubmit={create}>
           <input placeholder="new skill name" value={name} required
                  onChange={(e) => setName(e.target.value)} />
@@ -150,6 +150,6 @@ export default function Skills() {
           </>
         )}
       </main>
-    </div>
+    </Page>
   )
 }

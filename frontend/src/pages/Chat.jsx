@@ -637,7 +637,10 @@ export default function Chat() {
           {messages.length === 0 ? (
             <div className="chat-empty">
               <div className="orb" ref={orbRef} />
-              <h2>{greeting}</h2>
+              {/* the chat page's only heading, so it is the <h1>. It was an
+                  <h2> — the same level Projects used for its page title and
+                  Review used for a section title. */}
+              <h1>{greeting}</h1>
               {phone && fresh && (
                 <div className="empty-controls">
                   {projectPicker}
