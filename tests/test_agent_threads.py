@@ -246,3 +246,71 @@ async def test_interactive_run_honours_max_iterations(client, monkeypatch):
     await task                 # deterministic: the run closes its DB handle here
     assert (await post).status_code == 200
     assert seen[0]["max_iterations"] == 5
+
+
+async def test_interactive_run_sets_agent_slug(client, monkeypatch):
+    """WP5 addressing needs every agent RUN to carry its identity, not just the
+    chat path. `_run_headless` was covered; the interactive endpoint
+    (POST /api/agents/{slug}/run) opened its conversation without `agent=`, so
+    an interactive run was unaddressable by name and a message to it was told
+    the opposite of the truth. Regression guard for agents_run.run_agent."""
+    from backend import agents_run
+    await _make_agent(client)
+    release = asyncio.Event()
+    started = asyncio.Event()
+
+    async def blocking_turn(cid, system_prompt, history, **kw):
+        started.set()
+        await release.wait()
+        yield {"type": "final", "content": "done"}
+
+    monkeypatch.setattr(agents_run, "run_agent_turn", blocking_turn)
+    post = asyncio.create_task(client.post(
+        "/api/agents/builder/run", json={"task": "go", "confirm_peak": True}))
+    try:
+        await asyncio.wait_for(started.wait(), 5)
+        cid = max(agents_run._active_runs)
+        db = await get_db()
+        try:
+            async with db.execute(
+                "SELECT agent_slug FROM conversations WHERE id = ?", (cid,)) as cur:
+                assert (await cur.fetchone())["agent_slug"] == "builder", (
+                    "an interactive agent run has no identity, so send_message "
+                    "cannot address it by name")
+        finally:
+            await db.close()
+    finally:
+        release.set()
+        task = agents_run._active_runs.get(max(agents_run._active_runs, default=0))
+        if task is not None:
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+        with contextlib.suppress(asyncio.CancelledError, httpx.HTTPError):
+            await post
+
+
+async def test_ephemeral_chat_is_not_offered_send_message(client, monkeypatch):
+    """send_message has no `requires_project`, so it survived the ephemeral tool
+    filter and was offered to an incognito turn that can only ever be refused
+    when it calls it. It is dropped from the tool set now (chat.py), so the model
+    is not invited to promise a message it cannot send. Asserts ABSENCE, not
+    present-but-erroring."""
+    from backend import chat as chat_mod
+    seen: list[dict] = []
+    monkeypatch.setattr(chat_mod, "guest_turn", _capturing_turn(seen))
+
+    r = await client.post("/api/chat", json={"message": "hi", "ephemeral": True})
+    assert r.status_code == 200
+    await _settle()
+    assert len(seen) == 1
+    names = {t["function"]["name"] for t in seen[0]["tool_specs"]}
+    assert "send_message" not in names, (
+        "an incognito turn was handed send_message, which its own handler "
+        "refuses — a tool that can only error should not be offered")
+    # a persistent chat still gets it, so the filter is scoped to incognito
+    seen.clear()
+    r = await client.post("/api/chat", json={"message": "hi"})
+    assert r.status_code == 200
+    await _settle()
+    names = {t["function"]["name"] for t in seen[0]["tool_specs"]}
+    assert "send_message" in names
